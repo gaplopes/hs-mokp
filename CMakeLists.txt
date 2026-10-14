@@ -1,13 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# HS-MOCO — Hypervolume Scalarization for Multiobjective Combinatorial
-#            Optimization (header-only C++17 library)
+# HS-MOKP — Hypervolume Scalarizations for the Multiobjective 
+#           Knapsack Problem (MOKP) (header-only C++17 library)
 # ─────────────────────────────────────────────────────────────────────────────
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 
 project(hs_moco
   VERSION   0.1.0
   LANGUAGES CXX
-  DESCRIPTION "Header-only C++17 library for hypervolume scalarization in MOCO"
+  DESCRIPTION "Header-only C++17 library for Hypervolume Scalarizations for the MOKP"
 )
 
 # ── Options ──────────────────────────────────────────────────────────────────
@@ -24,28 +24,9 @@ option(HS_MOCO_BUILD_EXAMPLES "Build example executables" ${_HS_MOCO_IS_TOPLEVEL
 # ── Find Gurobi ─────────────────────────────────────────────────────────────
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
-find_package(GUROBI REQUIRED)
+find_package(GUROBI 12 REQUIRED)
 
 message(STATUS "[hs_moco] Gurobi ${GUROBI_VERSION} found at ${GUROBI_INCLUDE_DIRS}")
-
-# ── Find mooutils ───────────────────────────────────────────────────────────
-
-find_package(mooutils QUIET)
-if(NOT mooutils_FOUND)
-  include(FetchContent)
-  FetchContent_Declare(
-    mooutils
-    GIT_REPOSITORY https://github.com/adbjesus/mooutils.git
-    GIT_TAG        main
-  )
-  FetchContent_MakeAvailable(mooutils)
-  if(NOT TARGET mooutils::mooutils)
-    add_library(mooutils::mooutils ALIAS mooutils)
-  endif()
-  message(STATUS "[hs_moco] mooutils fetched from GitHub")
-else()
-  message(STATUS "[hs_moco] mooutils found (installed)")
-endif()
 
 # ── Header-only INTERFACE library ────────────────────────────────────────────
 
@@ -63,7 +44,6 @@ target_include_directories(hs_moco
 target_link_libraries(hs_moco
   INTERFACE
     GUROBI::GurobiCXX
-    mooutils::mooutils
 )
 
 # ── Examples ─────────────────────────────────────────────────────────────────

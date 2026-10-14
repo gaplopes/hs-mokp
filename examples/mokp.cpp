@@ -16,9 +16,9 @@
  */
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -211,6 +211,12 @@ std::vector<int64_t> compute_max_coords(
 /// A fixed seed is used for reproducibility.
 std::vector<std::vector<int64_t>> generate_nondominated_refs(
     const std::vector<int64_t>& max_coords, int k, unsigned seed = 42) {
+  if (k <= 0 || max_coords.empty() ||
+      std::any_of(max_coords.begin(), max_coords.end(),
+                  [](int64_t coordinate) { return coordinate < 0; }))
+    throw std::invalid_argument(
+        "generate_nondominated_refs: k must be positive and coordinate bounds nonempty and nonnegative");
+
   const auto m = max_coords.size();
   std::mt19937_64 rng(seed);
 
@@ -227,7 +233,10 @@ std::vector<std::vector<int64_t>> generate_nondominated_refs(
   };
 
   std::vector<std::vector<int64_t>> refs;
-  while (static_cast<int>(refs.size()) < k) {
+  // shortcut: sampling may reject feasible large sets; increase the budget if larger sets are needed.
+  constexpr int max_attempts = 100000;
+  for (int attempt = 0; attempt < max_attempts && static_cast<int>(refs.size()) < k;
+       ++attempt) {
     std::vector<int64_t> pt(m);
     for (size_t j = 0; j < m; ++j)
       pt[j] = dists[j](rng);
@@ -248,6 +257,10 @@ std::vector<std::vector<int64_t>> generate_nondominated_refs(
                refs.end());
     refs.push_back(std::move(pt));
   }
+  if (static_cast<int>(refs.size()) < k)
+    throw std::runtime_error(
+        "generate_nondominated_refs: could not generate " + std::to_string(k) +
+        " nondominated points after " + std::to_string(max_attempts) + " attempts");
   return refs;
 }
 
@@ -264,17 +277,20 @@ void print_vec(const std::vector<int64_t>& v) {
 const std::vector<std::string> STRATEGY_NAMES = {"miqp", "log", "milp"};
 
 /// Build a fresh strategy by name.
-std::unique_ptr<hs_moco::HSStrategy> make_strategy(const std::string& name) {
+std::unique_ptr<hs_moco::HSStrategy> make_strategy(
+    const std::string& name, hs_moco::NormalizationMethod normalization_method) {
   if (name == "log") return std::make_unique<hs_moco::LogStrategy>();
   if (name == "milp") return std::make_unique<hs_moco::MILPStrategy>();
-  return std::make_unique<hs_moco::MIQPStrategy>();
+  return std::make_unique<hs_moco::MIQPStrategy>(normalization_method);
 }
 
 /// Build a fresh solver for the given instance + strategy.
 hs_moco::MOKPSolver make_solver(const MOKPInstance& inst,
                                 const std::string& strategy_name,
-                                const hs_moco::SolverOptions& opts) {
-  return hs_moco::MOKPSolver(inst.to_problem(), make_strategy(strategy_name), opts);
+                                const hs_moco::SolverOptions& opts,
+                                hs_moco::NormalizationMethod normalization_method) {
+  return hs_moco::MOKPSolver(
+      inst.to_problem(), make_strategy(strategy_name, normalization_method), opts);
 }
 
 }  // namespace
@@ -301,7 +317,14 @@ int main(int argc, char* argv[]) {
       return 1;
     }
 
-    const int max_k = (argc >= 3) ? std::atoi(argv[2]) : 5;
+    int max_k = 5;
+    if (argc >= 3) {
+      const std::string argument = argv[2];
+      const auto [end, error] = std::from_chars(
+          argument.data(), argument.data() + argument.size(), max_k);
+      if (error != std::errc{} || end != argument.data() + argument.size() || max_k <= 0)
+        throw std::invalid_argument("max-k must be a positive integer");
+    }
 
     // ────────────────────────────────────────────────────────────────────────
     // 2. Load instance
@@ -327,6 +350,9 @@ int main(int argc, char* argv[]) {
     hs_moco::SolverOptions opts;
     opts.time_limit = 600.0;
     opts.threads = 4;
+
+    // Keep one method assignment active; None disables MIQP normalization.
+    auto normalization_method = hs_moco::NormalizationMethod::None;
 
     auto max_coords = compute_max_coords(instance.pareto_front, instance.num_objs);
     std::cout << "Max. coords : ";
@@ -383,7 +409,7 @@ int main(int argc, char* argv[]) {
 
         // 4b. Run each strategy.
         for (const auto& sname : STRATEGY_NAMES) {
-          auto solver = make_solver(instance, sname, opts);
+          auto solver = make_solver(instance, sname, opts, normalization_method);
           ++total_tests;
 
           auto t0 = std::chrono::steady_clock::now();
@@ -416,7 +442,8 @@ int main(int argc, char* argv[]) {
               ++total_fail;
             }
           } else if (result.status == hs_moco::SolveStatus::TimeLimitReached) {
-            std::cout << "  ⚠ SKIP (" << hs_moco::to_string(result.status) << ")";
+            std::cout << "  ✘ FAIL (" << hs_moco::to_string(result.status) << ")";
+            ++total_fail;
           } else {
             std::cout << "  ✘ FAIL (unexpected status: "
                       << hs_moco::to_string(result.status) << ")";
@@ -439,10 +466,13 @@ int main(int argc, char* argv[]) {
       std::cout << ", " << total_fail << " FAILED";
     std::cout << "\n";
 
-    return total_fail > 0 ? 1 : 0;
+    return total_tests > 0 && total_pass == total_tests ? 0 : 1;
   } catch (GRBException& e) {
     std::cerr << "GRBException: " << e.getMessage()
               << " (error code " << e.getErrorCode() << ")\n";
+    return 1;
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << "\n";
     return 1;
   }
 }

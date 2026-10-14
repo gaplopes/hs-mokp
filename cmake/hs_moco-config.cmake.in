@@ -8,7 +8,7 @@ include(CMakeFindDependencyMacro)
 
 # Gurobi must be found by downstream consumers as well.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-find_dependency(GUROBI)
+find_dependency(GUROBI 12)
 
 include("${CMAKE_CURRENT_LIST_DIR}/hs_moco-targets.cmake")
 

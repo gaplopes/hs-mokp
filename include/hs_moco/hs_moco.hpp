@@ -21,6 +21,7 @@
 #include "hs_moco/core/solver.hpp"
 
 // Strategies
+#include "hs_moco/strategies/norm.hpp"
 #include "hs_moco/strategies/miqp.hpp"
 #include "hs_moco/strategies/log.hpp"
 #include "hs_moco/strategies/milp.hpp"

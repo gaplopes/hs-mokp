@@ -59,6 +59,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ ! "$MAX_K" =~ ^[0-9]+$ || ! "$MAX_K" =~ [1-9] ]]; then
+  echo "Error: max-k must be a positive integer."
+  exit 1
+fi
+
 # ── 1. Build ─────────────────────────────────────────────────────────────────
 EXECUTABLE="${BUILD_DIR}/examples/example_mokp"
 
@@ -194,7 +199,7 @@ for ((i=0; i<NUM_INSTANCES; i++)); do
     } >> "$LOG_FILE"
   elif [[ $exit_code -ne 0 ]]; then
     # Error (GRBException, crash, etc.)
-    error_line=$(echo "$output" | grep -iE 'GRBException|Error|error' | head -1)
+    error_line=$(echo "$output" | grep -iE 'GRBException|Error|error' | head -1 || true)
     printf "ERROR (exit %d) %s\n" "$exit_code" "$error_line"
     TOTAL_ERROR=$((TOTAL_ERROR + 1))
     RESULTS+=("ERROR    $rel_path  $error_line")
@@ -207,12 +212,18 @@ for ((i=0; i<NUM_INSTANCES; i++)); do
     } >> "$LOG_FILE"
   else
     # Parse summary line: "Summary: X/Y passed[, Z FAILED]"
-    summary=$(echo "$output" | grep -oP 'Summary: \K.*')
-    passed=$(echo "$summary" | grep -oP '^\d+')
-    total=$(echo "$summary" | grep -oP '/\K\d+')
-    failed=$(echo "$summary" | grep -oP '\d+ FAILED' | grep -oP '^\d+' || echo "0")
+    summary=$(printf '%s\n' "$output" | grep '^Summary:' || true)
+    summary=${summary#Summary: }
+    passed=0
+    total=0
+    failed=0
+    if [[ "$summary" =~ ^([0-9]+)/([0-9]+)\ passed(,\ ([0-9]+)\ FAILED)?$ ]]; then
+      passed=${BASH_REMATCH[1]}
+      total=${BASH_REMATCH[2]}
+      failed=${BASH_REMATCH[4]:-0}
+    fi
 
-    if [[ "$failed" -eq 0 ]]; then
+    if [[ "$total" -gt 0 && "$passed" -eq "$total" && "$failed" -eq 0 ]]; then
       printf "PASS (%s/%s)\n" "$passed" "$total"
       TOTAL_PASS=$((TOTAL_PASS + 1))
       RESULTS+=("PASS     $rel_path  ($passed/$total)")
@@ -224,11 +235,11 @@ for ((i=0; i<NUM_INSTANCES; i++)); do
         echo ""
       } >> "$LOG_FILE"
     else
-      printf "FAIL (%s/%s passed, %s failed)\n" "$passed" "$total" "$failed"
+      printf "FAIL (%s)\n" "${summary:-missing summary}"
       TOTAL_FAIL=$((TOTAL_FAIL + 1))
-      RESULTS+=("FAIL     $rel_path  ($passed/$total, $failed failed)")
+      RESULTS+=("FAIL     $rel_path  (${summary:-missing summary})")
       {
-        echo "[FAIL] $rel_path ($passed/$total, $failed failed)"
+        echo "[FAIL] $rel_path (${summary:-missing summary})"
         echo "--- Full output ---"
         echo "$output"
         echo "--- End output ---"
@@ -273,4 +284,4 @@ echo "Full results saved to: ${LOG_FILE}"
 } >> "$LOG_FILE"
 
 # Exit with failure if anything went wrong
-[[ $TOTAL_FAIL -eq 0 && $TOTAL_ERROR -eq 0 ]] && exit 0 || exit 1
+[[ $TOTAL_FAIL -eq 0 && $TOTAL_TIMEOUT -eq 0 && $TOTAL_ERROR -eq 0 ]] && exit 0 || exit 1

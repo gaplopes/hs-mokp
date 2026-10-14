@@ -13,6 +13,7 @@
  *   - Constraint: Σ_j w_j · x_j ≤ W.
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -127,6 +128,39 @@ class MOKProblem final {
       for (int j = 0; j < N_; ++j)
         C[i][j] = items_[j].values[i];
     return C;
+  }
+
+  /** @brief Dantzig bounds for nonnegative weights/capacity; otherwise positive-profit sums. */
+  [[nodiscard]] std::vector<double> objective_upper_bounds() const {
+    std::vector<double> bounds(M_, 0.0);
+    const bool nonstandard_weights = W_ < 0 || std::any_of(
+        items_.begin(), items_.end(), [](const MOKPItem& item) { return item.weight < 0; });
+    for (int d = 0; d < M_; ++d) {
+      long double bound = 0;
+      std::vector<int> order;
+      for (int j = 0; j < N_; ++j) {
+        if (items_[j].values[d] <= 0) continue;
+        // The fractional greedy bound assumes nonnegative weights and capacity.
+        if (nonstandard_weights || items_[j].weight == 0)
+          bound += items_[j].values[d];
+        else
+          order.push_back(j);
+      }
+      std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return static_cast<long double>(items_[a].values[d]) / items_[a].weight >
+               static_cast<long double>(items_[b].values[d]) / items_[b].weight;
+      });
+      long double remaining = W_;
+      for (int j : order) {
+        if (remaining <= 0) break;
+        const long double fraction = std::min(1.0L, remaining / items_[j].weight);
+        bound += fraction * items_[j].values[d];
+        remaining -= fraction * items_[j].weight;
+        if (fraction < 1) break;
+      }
+      bounds[d] = static_cast<double>(bound);
+    }
+    return bounds;
   }
 
   // ── MOKP-specific accessors ────────────────────────────────────────────

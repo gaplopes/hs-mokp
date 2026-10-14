@@ -71,18 +71,14 @@
  *     y_{ij} ≥ x_i + x_j − 1
  *     (y_{ij} ≥ 0 is implicit in variable bounds)
  *
- *   Degree 3:  w_{ijk} ≈ y_{ij} · x_k  (and symmetrically via y_{ik}, y_{jk})
- *     For each decomposition (t \ {p}, {p}):
- *       w_{ijk} ≤ y_{..}    (the sub-product variable)
- *       w_{ijk} ≤ x_p
- *       w_{ijk} ≥ y_{..} + x_p − 1
+ *   Degree m: z_t = Π_{j∈t} x_j
+ *     z_t ≤ x_j for every j ∈ t
+ *     z_t ≥ Σ_{j∈t} x_j − m + 1
+ *     (0 ≤ z_t ≤ 1 is implicit in variable bounds)
  *
- *     Three decompositions per triple (p = i, j, k) give 9 constraints,
- *     tightening the LP relaxation from all directions.
- *
- *   Higher degrees generalize analogously, decomposing a degree-m variable
- *   into a degree-(m−1) sub-product times a single x, for each of the m
- *   possible single variables to split off.
+ *   These m+1 constraints are exact for binary x. For m≥3, the continuous
+ *   relaxation can be weaker than using every pairwise decomposition.
+ *   Variables and constraints are retained when reference points change.
  *
  * ═══════════════════════════════════════════════════════════════════════════
  *  5. IMPLEMENTATION OUTLINE
@@ -107,7 +103,7 @@
  *            exclusion coefficient, collapse repeated indices (x²=x), and
  *            add to the GRBLinExpr. Also add the constant term (m = 0).
  *
- *   Step 6 — Add McCormick envelope constraints for all linearization vars.
+ *   Step 6 — Add binary-product constraints once, then reuse the structure.
  *
  * ═══════════════════════════════════════════════════════════════════════════
  *  6. MODEL SIZE (for M objectives, N variables, K reference points)
@@ -119,8 +115,8 @@
  *
  *   McCormick constraints:
  *     Degree 2:  3 · C(N,2)
- *     Degree 3:  9 · C(N,3)    (3 decompositions × 3 constraints each)
- *     Degree m:  3m · C(N,m)
+ *     Degree 3:  4 · C(N,3)
+ *     Degree m:  (m+1) · C(N,m)
  *
  *   Pure MILP — no quadratic or general constraints.
  *
@@ -166,6 +162,14 @@ class MILPStrategy final : public HSStrategy {
     // Nothing to override — standard MILP settings suffice.
   }
 
+  void clear_auxiliary(GRBModel& model, AuxiliaryState& aux) override {
+    if (built_model_ != &model) {
+      aux.clear(model);
+      vars_.clear();
+      built_model_ = nullptr;
+    }
+  }
+
   /**
    * @brief Build the McCormick-linearized polynomial HS objective.
    *
@@ -176,7 +180,7 @@ class MILPStrategy final : public HSStrategy {
    *  3. Compute polynomial coefficients via calc_coeff().
    *  4. Create linearization variables for each strict tuple.
    *  5. Assemble the GRBLinExpr objective (collapsing x²=x).
-   *  6. Add McCormick envelope constraints.
+   *  6. Reuse binary-product constraints across reference-point sets.
    *
    * @pre ctx.coeff_matrix must be non-empty (M × N matrix).
    * @throws std::runtime_error if coefficient_matrix is missing.
@@ -303,20 +307,33 @@ class MILPStrategy final : public HSStrategy {
     //
     // The map key is the sorted tuple; degree-1 maps to the original x_j.
     //
-    std::map<std::vector<int>, GRBVar> vars;
+    if (built_model_ != &model || aux.empty()) {
+      built_model_ = nullptr;
+      vars_.clear();
 
-    // Degree-1 variables are the decision variables themselves
-    for (int i = 0; i < N; ++i) {
-      vars[{i}] = ctx.x_vars[i];
-    }
-
-    // Higher-degree linearization variables: y_{ij}, w_{ijk}, ...
-    for (int m = 2; m <= M; ++m) {
-      auto strict_tuples = get_strict_combinations(N, m);
-      for (const auto& t : strict_tuples) {
-        vars[t] = aux.addVar(model, 0.0, 1.0, 0.0, GRB_CONTINUOUS,
-                             "lin_" + tuple_name(t));
+      // Degree-1 variables are the decision variables themselves
+      for (int i = 0; i < N; ++i) {
+        vars_[{i}] = ctx.x_vars[i];
       }
+
+      // Higher-degree linearization variables: y_{ij}, w_{ijk}, ...
+      for (int m = 2; m <= M; ++m) {
+        auto strict_tuples = get_strict_combinations(N, m);
+        for (const auto& t : strict_tuples) {
+          GRBVar z = aux.addVar(model, 0.0, 1.0, 0.0, GRB_CONTINUOUS,
+                               "lin_" + tuple_name(t));
+          vars_[t] = z;
+          std::string tag = "mc_" + tuple_name(t);
+          GRBLinExpr sum = 0;
+          for (size_t p = 0; p < t.size(); ++p) {
+            aux.addConstr(model, z <= ctx.x_vars[t[p]],
+                          tag + "_ub" + std::to_string(p + 1));
+            sum += ctx.x_vars[t[p]];
+          }
+          aux.addConstr(model, z >= sum - m + 1, tag + "_lb");
+        }
+      }
+      built_model_ = &model;
     }
 
     // ── 5. Objective construction ────────────────────────────────────────
@@ -353,7 +370,7 @@ class MILPStrategy final : public HSStrategy {
           // Collapse repeated vars: x_0·x_0·x_1 → y_{0,1} (since x_i²=x_i for binary)
           std::set<int> unique(t.begin(), t.end());
           std::vector<int> collapsed(unique.begin(), unique.end());
-          obj += coeff_sum * vars[collapsed];
+          obj += coeff_sum * vars_[collapsed];
         }
       }
     }
@@ -368,55 +385,12 @@ class MILPStrategy final : public HSStrategy {
     obj += sign_M_0 * const_sum;
 
     model.setObjective(obj, GRB_MAXIMIZE);
-
-    // ── 6. McCormick envelopes ───────────────────────────────────────────
-    //
-    // For each linearization variable (representing a product of binaries),
-    // add McCormick envelope constraints that make the LP relaxation tight.
-    //
-    // General rule for z ≈ a · b where a, b ∈ [0,1]:
-    //   z ≤ a,  z ≤ b,  z ≥ a + b − 1,  z ≥ 0
-    //
-    // These are exact (not a relaxation) when a, b are binary.
-    //
-    // For degree-m variables, we decompose into (degree-(m-1)) × (degree-1)
-    // and apply McCormick to each decomposition, giving 3·m constraints
-    // per variable. Multiple decompositions tighten the LP relaxation.
-    //
-    for (int m = 2; m <= M; ++m) {
-      auto strict_tuples = get_strict_combinations(N, m);
-      for (const auto& t : strict_tuples) {
-        if (m == 2) {
-          // For degree-2, the two possible splits {i}×{j} and {j}×{i}
-          // produce identical McCormick constraints (product is symmetric).
-          // Emit each constraint exactly once:
-          //   lin_{ij} <= x_i,  lin_{ij} <= x_j,
-          //   lin_{ij} >= x_i + x_j - 1
-          std::string tag = "mc_" + tuple_name(t);
-          aux.addConstr(model, vars[t] <= vars[{t[0]}], tag + "_ub1");
-          aux.addConstr(model, vars[t] <= vars[{t[1]}], tag + "_ub2");
-          aux.addConstr(model, vars[t] >= vars[{t[0]}] + vars[{t[1]}] - 1,
-                        tag + "_lb");
-        } else {
-          // For degree >= 3, each split through a different sub-tuple
-          // produces distinct constraints, so emit all of them.
-          for (size_t p = 0; p < t.size(); ++p) {
-            std::vector<int> t_minus_p = t;
-            t_minus_p.erase(t_minus_p.begin() + static_cast<long>(p));
-            int x_idx = t[p];
-
-            std::string tag = "mc_" + tuple_name(t) + "_" + std::to_string(p);
-            aux.addConstr(model, vars[t] <= vars[t_minus_p], tag + "_ub1");
-            aux.addConstr(model, vars[t] <= vars[{x_idx}],   tag + "_ub2");
-            aux.addConstr(model, vars[t] >= vars[t_minus_p] + vars[{x_idx}] - 1,
-                          tag + "_lb");
-          }
-        }
-      }
-    }
   }
 
  private:
+  GRBModel* built_model_ = nullptr;
+  std::map<std::vector<int>, GRBVar> vars_;
+
   static std::string tuple_name(const std::vector<int>& t) {
     std::string s;
     for (size_t i = 0; i < t.size(); ++i) {

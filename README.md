@@ -1,4 +1,4 @@
-# HS-MOCO
+# HS-MOKP
 
 > Header-only C++20 library for **Hypervolume Scalarization** in
 > the Multiobjective Knapsack Problem (MOKP).
@@ -21,7 +21,7 @@ $$
 \prod_{i=1}^{m} \bigl(f_i(x) - \max_{r \in S}\, r_i\bigr)
 $$
 
-HS-MOCO encodes this objective as a Mixed-Integer Program (MIP)
+HS-MOKP encodes this objective as a Mixed-Integer Program (MIP)
 specifically parameterized for the Multiobjective Knapsack Problem (MOKP),
 and provides three alternative formulation strategies,
 trading off model size and numerical behaviour directly tailored for Gurobi formulation patterns.
@@ -30,7 +30,7 @@ See the [Strategies](#strategies) section below for details.
 > [!NOTE]
 > **Solver backend.** This library requires **[Gurobi Optimizer](https://www.gurobi.com/)** 
 > to function, directly relying on its C++ API capabilities to interpret linear 
-> constraints (MILP), quadratic constraints (MIQP), and non-linear function
+> constraints (MILP), nonlinear product constraints (`addGenConstrNL`), and non-linear function
 > features (`FuncNonLinear`) like logs and exponential operations utilized in the formulations.
 
 > [!NOTE]
@@ -42,11 +42,17 @@ See the [Strategies](#strategies) section below for details.
 
 ## Strategies
 
-### 1. MIQP — Bilinear Product
+### 1. MIQP — Nonlinear Product
 
 The most conceptually simple strategy. Each product
-$\prod_d (f_d(x) - r_d)$ is computed via a **balanced binary-tree reduction**
-of pairwise bilinear equalities:
+$\prod_d (f_d(x) - r_d)$ is defined by one **nonlinear general constraint**
+using `addGenConstrNL`. The C++ expression tree has one n-ary multiplication
+node over the bound factors, and Gurobi handles the internal product formulation.
+For $M \geq 2$, each subset adds $M+1$ variables, $M$ linear constraints, and
+one nonlinear general constraint.
+
+The balanced binary-tree helper remains in `miqp.hpp` for comparison. It uses
+pairwise bilinear equalities:
 
 $$
 \begin{aligned}
@@ -55,6 +61,29 @@ p_{0123} &= p_{01} \cdot p_{23}, \quad \ldots \\
 P        &= \text{final product variable}
 \end{aligned}
 $$
+
+MIQP defaults to `NormalizationMethod::None`, leaving factors unscaled.
+Per-objective Dantzig upper bounds are computed once during solver construction
+from the fractional knapsack relaxation. Selecting another method uses these
+bounds for normalization. With `PrecisionOptimal` and `abs_tol = 1e-8`,
+the modeled objective is `1e-8 * HS`; returned results restore the original HS units.
+The normalization tolerance is at least ten times the model's effective
+`FeasibilityTol` (normally `1e-9`).
+`PrecisionOptimal` leaves the formulation unscaled for nonpositive bounds.
+
+Upper bounds alone do not enable normalization. All methods return HS in its original units.
+
+`strategies/norm.hpp` provides `precision_optimal_norm`, `upper_bound_norm`,
+and `reference_gap_norm`. Select the MIQP method in its constructor:
+
+```cpp
+auto strategy = std::make_unique<hs_moco::MIQPStrategy>(
+    hs_moco::NormalizationMethod::ReferenceGap);
+```
+
+`UpperBound` divides by each upper bound, and `ReferenceGap` scales the
+reference-gap bounding box to volume `1e4`. These choices can produce different
+numerical errors despite preserving the exact mathematical maximizer.
 
 ### 2.Logarithm transformation and Log-Sum-Exp (LSE) reformulation
 
@@ -97,6 +126,11 @@ Since $x_j \in \{0,1\} \Rightarrow x_j^2 = x_j$, degenerate monomials
 collapse (e.g., $x_0 \cdot x_0 \cdot x_1 = x_0 \cdot x_1$), so only
 $\binom{N}{m}$ **strict** combinations are needed at each degree $m$.
 
+Higher-degree products use $m+1$ constraints: $z \leq x_j$ for each factor and
+$z \geq \sum_j x_j - m + 1$. This remains exact for binary decisions, but its
+continuous relaxation can be weaker than the recursive formulation. Product
+variables and constraints are retained across solves with different references.
+
 > [!TIP]
 > Each strategy header file
 > ([`miqp.hpp`](include/hs_moco/strategies/miqp.hpp),
@@ -110,7 +144,7 @@ $\binom{N}{m}$ **strict** combinations are needed at each degree $m$.
 
 - **Built exclusively on top of the Gurobi C++ API.**
 - **Three MIP formulation strategies for MOKP instances:** 
-  1. MIQP (bilinear product)
+  1. MIQP (nonlinear product)
   2. Logarithm transformation and Log-Sum-Exp (LSE) reformulation
   3. MILP (McCormick linearization)
 - **Build once, solve many times:** separate model construction from solving, allowing efficient re-use across multiple reference-point sets
@@ -123,8 +157,8 @@ $\binom{N}{m}$ **strict** combinations are needed at each degree $m$.
 | Dependency | Version | Notes |
 |------------|---------|-------|
 | C++ compiler | C++20 support | GCC ≥ 10, Clang ≥ 13, Microsoft Visual C++ ≥ 19.29 |
-| CMake | ≥ 3.16 | |
-| [Gurobi Optimizer](https://www.gurobi.com/) | ≥ 9.5 | Set `GUROBI_HOME` to your installation directory |
+| CMake | ≥ 3.21 | |
+| [Gurobi Optimizer](https://www.gurobi.com/) | ≥ 12 | Set `GUROBI_HOME` to your installation directory |
 
 Set `GUROBI_HOME` to your Gurobi installation directory (e.g. `/opt/gurobi1203/linux64`).
 
@@ -230,8 +264,8 @@ if (result.status == hs_moco::SolveStatus::Optimal) {
 
 ## Consuming in Your CMake Project
 
-Gurobi must be findable at configure time. `mooutils` is automatically fetched
-via `FetchContent` if it is not already installed.
+Gurobi 12 or newer must be findable at configure time. When examples are enabled,
+`mooutils` is automatically fetched via `FetchContent` if it is not already installed.
 
 ### Via `add_subdirectory`
 
@@ -282,7 +316,7 @@ hs-moco/
 │       │   ├── strategy.hpp         ← HSStrategy, AuxiliaryState, StrategyContext
 │       │   └── solver.hpp           ← MOKPSolver orchestrator
 │       ├── strategies/
-│       │   ├── miqp.hpp             ← bilinear product (NonConvex=2)
+│       │   ├── miqp.hpp             ← nonlinear product (addGenConstrNL)
 │       │   ├── log.hpp              ← log-sum-exp (FuncNonlinear=1)
 │       │   └── milp.hpp             ← McCormick linearization
 │       └── problems/

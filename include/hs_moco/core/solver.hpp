@@ -30,12 +30,12 @@
  *    - Binds each f_i(x) to a continuous GRBVar (obj_vars).
  *
  * 2. **solve(refs)** (repeatable):
- *    - Clears previous auxiliary state (if any).
+ *    - Clears previous temporary state, retaining reusable strategy structure.
  *    - Adds domination constraints: f_i(x) > max_j(refs_j^i).
  *    - Calls Strategy::build_objective() to set up the HS formulation.
  *    - Optimizes.
  *    - Extracts SolveResult.
- *    - Clears auxiliary state, ready for next call.
+ *    - Retains state until cleanup before the next call.
  */
 
 #include <algorithm>
@@ -124,8 +124,9 @@ class MOKPSolver {
       model_->addConstr(obj_vars_[i] == f_exprs[i], "f_def_" + std::to_string(i));
     }
 
-    // ── 6. Cache coefficient matrix for strategies ─────────────────────────
+    // ── 6. Cache coefficients and upper bounds for strategies ──────────────
     coeff_matrix_ = problem_->coefficient_matrix();
+    objective_upper_bounds_ = problem_->objective_upper_bounds();
 
     model_->update();
   }
@@ -159,14 +160,14 @@ class MOKPSolver {
 
     try {
       // ── 1. Clean up any previous auxiliary state ────────────────────────
-      aux_.clear(*model_);
+      strategy_->clear_auxiliary(*model_, aux_);
       domination_aux_.clear(*model_);
 
       // ── 2. Domination constraints: f_i(x) > max_j(refs_j^i) ───────────
       add_domination_constraints(refs);
 
       // ── 3. Build the HS objective via the strategy ─────────────────────
-      StrategyContext ctx{M_, N_, obj_vars_, x_vars_, coeff_matrix_};
+      StrategyContext ctx{M_, N_, obj_vars_, x_vars_, coeff_matrix_, objective_upper_bounds_};
       strategy_->build_objective(*model_, ctx, refs, aux_);
 
       model_->update();
@@ -225,6 +226,7 @@ class MOKPSolver {
   std::vector<GRBVar> obj_vars_;  ///< f_i(x) continuous variables (immutable).
 
   std::vector<std::vector<int64_t>> coeff_matrix_;  ///< Cached coefficient matrix.
+  std::vector<double> objective_upper_bounds_;     ///< Cached fractional-knapsack bounds.
 
   AuxiliaryState aux_;             ///< Strategy-owned auxiliary state.
   AuxiliaryState domination_aux_;  ///< Domination constraint auxiliary state.

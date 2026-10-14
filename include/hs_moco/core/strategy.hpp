@@ -8,16 +8,16 @@
  * A strategy encodes *how* the hypervolume scalarization (HS) is formulated
  * in terms of the Gurobi model.  Three concrete strategies are provided:
  *
- *  - MIQPStrategy  : direct polynomial product via bilinear constraints.
+ *  - MIQPStrategy  : direct polynomial product via nonlinear constraints.
  *  - LogStrategy   : log-sum-exp reformulation.
  *  - MILPStrategy  : McCormick-envelope linearization.
  *
  * ──── Auxiliary-state lifecycle ────
  * Every call to build_objective() may add auxiliary variables, linear /
  * quadratic / general constraints to the model.  These are recorded in an
- * AuxiliaryState and removed by clear_auxiliary() before the next solve(),
- * leaving the immutable base model (decision vars + feasibility constraints)
- * intact.
+ * AuxiliaryState and passed to clear_auxiliary() before the next solve().
+ * Strategies may retain reference-independent structure; the immutable base
+ * model (decision vars + feasibility constraints) remains intact.
  */
 
 #include <cmath>
@@ -92,6 +92,13 @@ struct AuxiliaryState {
     return c;
   }
 
+  void addGenConstrNL(GRBModel& model, GRBVar resvar, int nnodes,
+                      const int* opcode, const double* data, const int* parent,
+                      const std::string& name = "") {
+    GRBGenConstr gc = model.addGenConstrNL(resvar, nnodes, opcode, data, parent, name);
+    gen_constrs.push_back(gc);
+  }
+
   void addGenConstrLog(GRBModel& model, GRBVar xvar, GRBVar yvar,
                        const std::string& name = "") {
     GRBGenConstr gc = model.addGenConstrLog(xvar, yvar, name);
@@ -128,6 +135,9 @@ struct StrategyContext {
 
   /// Per-variable, per-objective coefficients (may be empty).
   const std::vector<std::vector<int64_t>>& coeff_matrix;
+
+  /// Optional upper bounds for each objective (used for normalization).
+  std::vector<double> objective_upper_bounds{}; ///< Optional bounds for objective normalization.
 };
 
 // ──────────────────────── Abstract Strategy ──────────────────────────────────
@@ -151,6 +161,11 @@ class HSStrategy {
    * or FuncNonlinear=1 should set the appropriate flags here.
    */
   virtual void configure_options(struct SolverOptions& opts) const {}
+
+  /** @brief Clear temporary state before the next solve; reusable structure may remain. */
+  virtual void clear_auxiliary(GRBModel& model, AuxiliaryState& aux) {
+    aux.clear(model);
+  }
 
   /**
    * @brief Build the HS objective for the given reference points.
@@ -194,7 +209,10 @@ class HSStrategy {
     os << "  NumVars      : " << model.get(GRB_IntAttr_NumVars) << "\n";
     os << "  NumConstrs   : " << model.get(GRB_IntAttr_NumConstrs) << "\n";
     os << "  NumQConstrs  : " << model.get(GRB_IntAttr_NumQConstrs) << "\n";
-    int64_t total_constrs = model.get(GRB_IntAttr_NumConstrs) + model.get(GRB_IntAttr_NumQConstrs);
+    os << "  NumGenConstrs: " << model.get(GRB_IntAttr_NumGenConstrs) << "\n";
+    int64_t total_constrs = model.get(GRB_IntAttr_NumConstrs) +
+                           model.get(GRB_IntAttr_NumQConstrs) +
+                           model.get(GRB_IntAttr_NumGenConstrs);
     os << "  TotalConstrs : " << total_constrs << "\n";
   }
 };
