@@ -338,12 +338,12 @@ discuss the approach.
 ## Citation
 
 ```bibtex
-@software{lopes2026hsmoco,
+@software{lopes2026hsmokp,
   author       = {Lopes, Gon{\c{c}}alo},
-  title        = {{HS-MOCO}: Hypervolume Scalarization for the Multiobjective
+  title        = {{HS-MOKP}: Hypervolume Scalarization for the Multiobjective
                   Knapsack Problem},
   year         = {2026},
-  url          = {https://github.com/gaplopes/hs-moco}
+  url          = {https://github.com/gaplopes/hs-mokp}
 }
 ```
 
