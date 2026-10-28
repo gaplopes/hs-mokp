@@ -10,6 +10,7 @@
  */
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -57,11 +58,8 @@ struct SolverOptions {
   bool   console_log    = false;   ///< Print solver log to stdout.
   double feasibility_tol = 1e-9;   ///< Primal feasibility tolerance.
 
-  /// @brief Strategy-specific flag: enable Gurobi NonConvex=2 (required by MIQPStrategy).
-  bool   allow_nonconvex = false;
-
-  /// @brief Strategy-specific flag: enable Gurobi FuncNonlinear=1 (required by LogStrategy).
-  bool   func_nonlinear  = false;
+  /// @brief Explicit Gurobi overrides, applied during solver construction.
+  std::map<std::string, std::string> gurobi_params;
 };
 
 // ─────────────────────────── Solve Result ────────────────────────────────────

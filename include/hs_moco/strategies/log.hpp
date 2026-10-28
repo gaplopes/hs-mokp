@@ -46,10 +46,13 @@
  *   HS = Σ_{S⊆R, S≠∅} (−1)^{|S|+1} Π_d (f_d − max_S r_d)
  *      = (sum of positive terms) − (sum of negative terms)
  *
- * In log space, each product becomes a sum S_S = Σ_d log(f_d − max_S r_d).
+ * With reduce_corners=true, first aggregate subset signs by component-wise
+ * maximum reference corner c. Otherwise, keep every nonempty subset with
+ * weight +1 or -1.
+ * In log space, each retained term becomes S_c = log|w_c| + Σ_d log(f_d − c_d).
  * The full HS is:
  *
- *   HS = Σ_{|S| odd} exp(S_S) − Σ_{|S| even} exp(S_S)
+ *   HS = Σ_{w_c > 0} exp(S_c) − Σ_{w_c < 0} exp(S_c)
  *
  * We want to maximize log(HS), which becomes:
  *
@@ -82,8 +85,9 @@
  *   5. logSum = log(sumExp)               (GenConstrLog)
  *   6. LSE   = max_var + logSum           (linear constraint)
  *
- * Model cost per LSE(n terms): 2n+3 variables, n+3 linear constraints,
+ * Model cost per LSE(n terms): 2n+4 variables, n+2 linear constraints,
  *                               n+2 general constraints.
+ * A singleton LSE returns its input directly, adding no model objects.
  *
  * ═══════════════════════════════════════════════════════════════════════════
  *  5. FINAL ASSEMBLY (k ≥ 2)
@@ -96,10 +100,10 @@
  *   3. exp_bma   = exp(B_minus_A)  ∈ (0,1) (GenConstrExp)
  *   4. one_minus = 1 − exp_bma    ∈ (0,1] (linear)
  *   5. log_om    = log(one_minus)          (GenConstrLog)
- *   6. result    = Lpos + log_om           (linear)
+ *   6. Maximize Lpos + log_om directly     (linear objective)
  *
- * The model objective is: maximize result.
- * decode_objective() recovers HS = exp(result).
+ * No resultant variable or defining equality is needed.
+ * decode_objective() recovers HS by exponentiating the raw objective.
  *
  * ═══════════════════════════════════════════════════════════════════════════
  *  6. MODEL SIZE SUMMARY
@@ -107,11 +111,17 @@
  *
  *   k = 1:  2M vars, M linear constrs, M general constrs.
  *
- *   k ≥ 2:  (2^K − 1) sum-of-logs blocks (each 2M+1 vars, M+1 lin, M gen)
- *           + 2 LSE blocks (positives + negatives)
- *           + 6 final-assembly vars/constrs
+ *   With reduce_corners=true:
+ *   C = 1 retained corner: same formulation as k = 1.
+ *   C > 1: G shared coordinate-gap logs (each 2 vars, 1 lin, 1 gen), G <= M k
+ *           + C sum-of-logs bindings (each 1 var, 1 lin)
+ *           + up to 2 LSE blocks (singleton lists add no objects)
+ *           + 4 final-assembly vars, 3 linear constrs, 2 general constrs
  *
- *   General constraints scale as O(M · 2^K).
+ *   Without corner reduction, C = 2^k - 1 submitted subset terms; the same
+ *   shared gap/log construction and LSE assembly apply.
+ *
+ *   General constraints scale as O(M k + C).
  *
  *   Adaptive FeasibilityTol: 1e-9 for k=1 (steep log gradients),
  *                            1e-6 for k>1 (noise accumulation).
@@ -122,12 +132,14 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "gurobi_c++.h"
 
+#include "hs_moco/core/references.hpp"
 #include "hs_moco/core/strategy.hpp"
 #include "hs_moco/core/types.hpp"
 
@@ -139,20 +151,14 @@ namespace hs_moco {
  */
 class LogStrategy final : public HSStrategy {
  public:
+  explicit LogStrategy(bool reduce_corners = false) : reduce_corners_(reduce_corners) {}
+
   [[nodiscard]] std::string name() const override { return "Log"; }
 
   void print_statistics(const GRBModel& model,
                         std::ostream& os = std::cout) const override {
     os << "[Log] Strategy statistics\n";
     print_model_statistics(model, os);
-  }
-
-  /**
-   * @brief Requires FuncNonlinear=1 for log/exp general constraints.
-   */
-  void configure_options(SolverOptions& opts) const override {
-    opts.func_nonlinear = true;
-    // Adaptive feasibility tolerance is applied per-solve in build_objective
   }
 
   /**
@@ -165,6 +171,8 @@ class LogStrategy final : public HSStrategy {
   /**
    * @brief Build the log-space HS objective for the given reference points.
    *
+   * Requires FuncNonlinear=1 for log/exp general constraints.
+   *
    * Dispatches to:
    *  - build_single_ref() for k=1: direct Σ log(f_d − r_d).
    *  - build_multi_ref()  for k≥2: inclusion–exclusion via LSE.
@@ -173,6 +181,7 @@ class LogStrategy final : public HSStrategy {
                        const StrategyContext& ctx,
                        const std::vector<std::vector<int64_t>>& refs,
                        AuxiliaryState& aux) override {
+    model.set(GRB_IntParam_FuncNonlinear, 1);
     const int M = ctx.M;
     const int k = static_cast<int>(refs.size());
 
@@ -193,6 +202,8 @@ class LogStrategy final : public HSStrategy {
   }
 
  private:
+  bool reduce_corners_ = false;
+
   static constexpr double EPS            = 1e-12;
   static constexpr double DOMINATION_EPS = 0.5;
 
@@ -229,34 +240,48 @@ class LogStrategy final : public HSStrategy {
                        const StrategyContext& ctx,
                        const std::vector<std::vector<int64_t>>& refs,
                        AuxiliaryState& aux) const {
-    const int M = ctx.M;
-    const int k = static_cast<int>(refs.size());
-    assert(k >= 2);
+    assert(refs.size() >= 2);
 
-    // Build S_mask = Σ_i log(f_i − max_S r_i) for each non-empty subset S
-    std::vector<GRBVar> positives;  // |S| odd  (inclusion)
-    std::vector<GRBVar> negatives;  // |S| even (exclusion)
-
-    const int total_masks = (1 << k);
-    for (int mask = 1; mask < total_masks; ++mask) {
-      // Compute component-wise max for this subset
-      std::vector<int64_t> rS(M, std::numeric_limits<int64_t>::min());
-      int bits = 0;
-      for (int j = 0; j < k; ++j) {
-        if (mask & (1 << j)) {
-          ++bits;
-          for (int i = 0; i < M; ++i)
-            rS[i] = std::max(rS[i], refs[j][i]);
-        }
-      }
-
-      GRBVar S_mask = build_sum_of_logs(model, ctx.obj_vars, rS,
-                                        "S_" + std::to_string(mask), aux);
-
-      if (bits % 2 == 1)
+    std::vector<GRBVar> positives;  // positive aggregate weights
+    std::vector<GRBVar> negatives;  // negative aggregate weights
+    // Share gaps and logarithms within this solve; auxiliary handles expire at cleanup.
+    std::vector<std::map<int64_t, GRBVar>> log_vars(ctx.M);
+    auto add_term = [&](const std::vector<int64_t>& corner, int64_t weight, int index) {
+      GRBVar S_mask = build_sum_of_logs(model, ctx.obj_vars, corner, weight, log_vars,
+                                        "S_" + std::to_string(index), aux);
+      if (weight > 0)
         positives.push_back(S_mask);
       else
         negatives.push_back(S_mask);
+    };
+
+    if (reduce_corners_) {
+      const auto corners = detail::inclusion_exclusion_corners(refs);
+      if (corners.size() == 1) {
+        build_single_ref(model, ctx, corners.begin()->first, aux);
+        return;
+      }
+      // Build S = log(|weight|) + Σ_i log(f_i − corner_i) for each retained corner.
+      int index = 0;
+      for (const auto& [corner, weight] : corners)
+        add_term(corner, weight, index++);
+    } else {
+      const int k = static_cast<int>(refs.size());
+      const int total_masks = (1 << k);
+      for (int mask = 1; mask < total_masks; ++mask) {
+        // Compute component-wise max reference for this subset.
+        std::vector<int64_t> max_ref(ctx.M, std::numeric_limits<int64_t>::min());
+        int bits = 0;
+        for (int j = 0; j < k; ++j) {
+          if (mask & (1 << j)) {
+            ++bits;
+            for (int i = 0; i < ctx.M; ++i)
+              max_ref[i] = std::max(max_ref[i], refs[j][i]);
+          }
+        }
+        int sign = (bits % 2 == 1) ? +1 : -1;
+        add_term(max_ref, sign, mask);
+      }
     }
 
     // Compute: result = log( Σ_pos exp(S_i) − Σ_neg exp(S_j) )
@@ -289,42 +314,44 @@ class LogStrategy final : public HSStrategy {
     aux.addGenConstrLog(model, one_minus, log_om, "log_one_minus_constr");
 
     // result = Lpos + log(1 − exp(Lneg − Lpos))
-    GRBVar result = aux.addVar(model, -GRB_INFINITY, GRB_INFINITY, 0.0,
-                               GRB_CONTINUOUS, "result");
-    aux.addConstr(model, result == Lpos + log_om, "def_result");
-
-    model.setObjective(GRBLinExpr(result), GRB_MAXIMIZE);
+    model.setObjective(GRBLinExpr(Lpos) + log_om, GRB_MAXIMIZE);
   }
 
-  // ── Helper: S = Σ_i log(f_i − ref_i) ──────────────────────────────────
+  // ── Helper: S = log|weight| + Σ_i log(f_i − ref_i) ─────────────────────
   //
-  // Builds S_S = Σ_d log(f_d(x) − ref_d) = log Π_d (f_d(x) − ref_d)
-  // for one inclusion–exclusion subset S.
+  // Builds the log magnitude of one aggregated inclusion–exclusion term.
   //
   // For each objective d:
   //   z_d = f_d(x) − ref_d   (lb = DOMINATION_EPS → strict domination)
   //   y_d = log(z_d)         (Gurobi GenConstrLog)
-  //   S   = Σ_d y_d
+  //   S   = log|weight| + Σ_d y_d
+  // Gap/log pairs are reused whenever the objective and reference coordinate match.
 
   static GRBVar build_sum_of_logs(GRBModel& model,
                                   const std::vector<GRBVar>& obj_vars,
                                   const std::vector<int64_t>& ref,
+                                  int64_t weight,
+                                  std::vector<std::map<int64_t, GRBVar>>& log_vars,
                                   const std::string& tag,
                                   AuxiliaryState& aux) {
     const int M = static_cast<int>(obj_vars.size());
-    GRBLinExpr sum_y = 0.0;
+    GRBLinExpr sum_y = std::log(std::abs(static_cast<double>(weight)));
 
     for (int i = 0; i < M; ++i) {
-      GRBVar z = aux.addVar(model, DOMINATION_EPS, GRB_INFINITY, 0.0,
-                            GRB_CONTINUOUS, tag + "_z_" + std::to_string(i));
-      aux.addConstr(model, z == obj_vars[i] - ref[i],
-                    tag + "_zdef_" + std::to_string(i));
+      auto found = log_vars[i].find(ref[i]);
+      if (found == log_vars[i].end()) {
+        GRBVar z = aux.addVar(model, DOMINATION_EPS, GRB_INFINITY, 0.0,
+                              GRB_CONTINUOUS, tag + "_z_" + std::to_string(i));
+        aux.addConstr(model, z == obj_vars[i] - ref[i],
+                      tag + "_zdef_" + std::to_string(i));
 
-      GRBVar y = aux.addVar(model, -GRB_INFINITY, GRB_INFINITY, 0.0,
-                            GRB_CONTINUOUS, tag + "_y_" + std::to_string(i));
-      aux.addGenConstrLog(model, z, y, tag + "_log_" + std::to_string(i));
+        GRBVar y = aux.addVar(model, -GRB_INFINITY, GRB_INFINITY, 0.0,
+                              GRB_CONTINUOUS, tag + "_y_" + std::to_string(i));
+        aux.addGenConstrLog(model, z, y, tag + "_log_" + std::to_string(i));
+        found = log_vars[i].emplace(ref[i], y).first;
+      }
 
-      sum_y += y;
+      sum_y += found->second;
     }
 
     GRBVar S = aux.addVar(model, -GRB_INFINITY, GRB_INFINITY, 0.0,
@@ -349,6 +376,7 @@ class LogStrategy final : public HSStrategy {
                             AuxiliaryState& aux) {
     if (vars.empty())
       throw std::runtime_error("log_sum_exp: empty var list");
+    if (vars.size() == 1) return vars.front();
 
     // maxVar = max(vars)
     GRBVar max_var = aux.addVar(model, -GRB_INFINITY, GRB_INFINITY, 0.0,

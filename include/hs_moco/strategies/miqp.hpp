@@ -80,6 +80,11 @@
  * continuous), so the objective itself is linear — all non-linearity
  * resides in the nonlinear constraints that define the products.
  *
+ * With reduce_corners=true, aggregate subsets with the same maximum corner
+ * before building products. Each retained corner contributes one product
+ * weighted by the sum of its subset signs; zero weights are omitted.
+ * Factors and product bindings are unchanged, with no coordinate shift.
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  *  4. MODEL SIZE (per-subset S, M objectives)
  * ═══════════════════════════════════════════════════════════════════════════
@@ -89,6 +94,8 @@
  *     Linear constraints:      M (term definitions)
  *     General constraints:     1 (nonlinear product)
  *     Quadratic constraints:   0
+ *   With corner reduction enabled, multiply these counts by the number of
+ *   retained corners instead of 2^K − 1 for the total submitted model size.
  *
  *   Retained balanced binary-tree formulation, per subset:
  *     Auxiliary variables:     M (term bindings) + M − 1 (product levels) = 2M − 1
@@ -110,6 +117,7 @@
 
 #include "gurobi_c++.h"
 
+#include "hs_moco/core/references.hpp"
 #include "hs_moco/core/strategy.hpp"
 #include "hs_moco/core/types.hpp"
 #include "hs_moco/strategies/norm.hpp"
@@ -123,21 +131,23 @@ namespace hs_moco {
 class MIQPStrategy final : public HSStrategy {
  public:
   MIQPStrategy() = default;
-  explicit MIQPStrategy(NormalizationMethod method) : normalization_method_(method) {}
+  explicit MIQPStrategy(NormalizationMethod method = NormalizationMethod::None, bool reduce_corners = false)
+      : normalization_method_(method), reduce_corners_(reduce_corners) {}
 
-  [[nodiscard]] std::string name() const override { return "MIQP"; }
+  [[nodiscard]] std::string name() const override {
+    return reduce_corners_ ? "MIQP-Aggregated" : "MIQP";
+  }
 
   void print_statistics(const GRBModel& model,
                         std::ostream& os = std::cout) const override {
-    os << "[MIQP] Strategy statistics\n";
+    os << "[" << name() << "] Strategy statistics\n";
     print_model_statistics(model, os);
   }
 
   /**
-   * @brief Requires NonConvex=2 for bilinear equality constraints.
+   * @brief Use a tighter default feasibility tolerance for MIQP.
    */
   void configure_options(SolverOptions& opts) const override {
-    opts.allow_nonconvex = true;
     opts.feasibility_tol = 1e-9;
   }
 
@@ -148,6 +158,8 @@ class MIQPStrategy final : public HSStrategy {
   /**
    * @brief Build the inclusion–exclusion polynomial product objective.
    *
+   * Requires NonConvex=2 for bilinear equality constraints.
+   *
    * For each non-empty subset S ⊆ {0..K-1}:
    *  1. Compute the component-wise max reference: r_S^d = max_{j∈S} refs[j][d].
    *  2. Build M normalized linear terms: t_d = (f_d(x) − r_S^d) / norm_d.
@@ -155,11 +167,14 @@ class MIQPStrategy final : public HSStrategy {
    *  4. Weight by inclusion–exclusion sign: (−1)^{|S|+1}.
    *
    * The final objective is the linear combination: obj = Σ_S sign_S · P_S.
+   * With corner reduction enabled, build only distinct products with nonzero
+   * aggregate integer coefficients, using the same normalized factors.
    */
   void build_objective(GRBModel& model,
                        const StrategyContext& ctx,
                        const std::vector<std::vector<int64_t>>& refs,
                        AuxiliaryState& aux) override {
+    model.set(GRB_IntParam_NonConvex, 2);
     const int M = ctx.M;
     const int k = static_cast<int>(refs.size());
     std::vector<double> norm(M, 1.0);
@@ -174,34 +189,42 @@ class MIQPStrategy final : public HSStrategy {
     // Inclusion–exclusion: Σ over non-empty subsets S ⊆ {0..k-1}
     //   sign = (−1)^{|S|+1}, product = Π_i (f_i − max_S r_i)
     GRBLinExpr obj_expr = 0;
-    const int total_masks = (1 << k);
-
-    for (int mask = 1; mask < total_masks; ++mask) {
-      // ── Compute component-wise max reference for this subset ────────
-      std::vector<int64_t> max_ref(M, std::numeric_limits<int64_t>::min());
-      int bits = 0;
-      for (int j = 0; j < k; ++j) {
-        if (mask & (1 << j)) {
-          ++bits;
-          for (int i = 0; i < M; ++i)
-            max_ref[i] = std::max(max_ref[i], refs[j][i]);
-        }
-      }
-
-      // ── Build product terms: (f_i − max_ref_i) for each objective ───
+    auto add_term = [&](const std::vector<int64_t>& corner, int64_t coefficient, int index) {
+      // ── Build product terms: (f_i − corner_i) for each objective ───
       std::vector<GRBLinExpr> terms;
       terms.reserve(M);
       for (int i = 0; i < M; ++i) {
-        terms.emplace_back((ctx.obj_vars[i] - max_ref[i]) / norm[i]);
+        terms.emplace_back((ctx.obj_vars[i] - corner[i]) / norm[i]);
       }
 
       // ── Reduce to a single product variable ────────────────────────
       GRBVar P = product_of_terms_nl(model, terms,
-                                  "PS_" + std::to_string(mask), aux);
+                                  "PS_" + std::to_string(index), aux);
+      obj_expr += coefficient * GRBLinExpr(P);
+    };
 
-      // ── Inclusion–exclusion sign ───────────────────────────────────
-      int sign = (bits % 2 == 1) ? +1 : -1;
-      obj_expr += sign * GRBLinExpr(P);
+    if (reduce_corners_) {
+      int index = 0;
+      for (const auto& [corner, weight] : detail::inclusion_exclusion_corners(refs))
+        add_term(corner, weight, index++);
+    } else {
+      const int total_masks = (1 << k);
+      for (int mask = 1; mask < total_masks; ++mask) {
+        // ── Compute component-wise max reference for this subset ────────
+        std::vector<int64_t> max_ref(M, std::numeric_limits<int64_t>::min());
+        int bits = 0;
+        for (int j = 0; j < k; ++j) {
+          if (mask & (1 << j)) {
+            ++bits;
+            for (int i = 0; i < M; ++i)
+              max_ref[i] = std::max(max_ref[i], refs[j][i]);
+          }
+        }
+
+        // ── Inclusion–exclusion sign ───────────────────────────────────
+        int sign = (bits % 2 == 1) ? +1 : -1;
+        add_term(max_ref, sign, mask);
+      }
     }
 
     model.setObjective(obj_expr, GRB_MAXIMIZE);
@@ -209,6 +232,7 @@ class MIQPStrategy final : public HSStrategy {
 
  private:
   NormalizationMethod normalization_method_ = NormalizationMethod::None;
+  bool reduce_corners_ = false;
   double objective_multiplier_ = 1.0;
 
   /**

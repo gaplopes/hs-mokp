@@ -90,19 +90,17 @@ class MOKPSolver {
     env_ = std::make_unique<GRBEnv>(true);
     env_->set(GRB_IntParam_OutputFlag, opts_.console_log ? 1 : 0);
     env_->set(GRB_IntParam_Threads, opts_.threads);
+    env_->set(GRB_DoubleParam_TimeLimit, opts_.time_limit);
+    env_->set(GRB_DoubleParam_MIPGap, opts_.mip_gap);
+    env_->set(GRB_IntParam_NumericFocus, opts_.numeric_focus);
+    env_->set(GRB_DoubleParam_FeasibilityTol, opts_.feasibility_tol);
+
+    for (const auto& [name, value] : opts_.gurobi_params)
+      env_->set(name, value);
     env_->start();
 
     // ── 2. Model ──────────────────────────────────────────────────────────
     model_ = std::make_unique<GRBModel>(*env_);
-    model_->set(GRB_DoubleParam_TimeLimit, opts_.time_limit);
-    model_->set(GRB_DoubleParam_MIPGap, opts_.mip_gap);
-    model_->set(GRB_IntParam_NumericFocus, opts_.numeric_focus);
-    model_->set(GRB_DoubleParam_FeasibilityTol, opts_.feasibility_tol);
-
-    if (opts_.allow_nonconvex)
-      model_->set(GRB_IntParam_NonConvex, 2);
-    if (opts_.func_nonlinear)
-      model_->set(GRB_IntParam_FuncNonlinear, 1);
 
     // ── 3. Decision variables ─────────────────────────────────────────────
     x_vars_ = problem_->setup_variables(*model_, var_type);
@@ -147,6 +145,7 @@ class MOKPSolver {
    * Can be called repeatedly — auxiliary state is cleaned up automatically.
    *
    * @param refs  Non-empty vector of reference points (each M-dimensional).
+   *              Counts at or above std::numeric_limits<int>::digits return Error.
    * @return SolveResult with status, objective value, and solution point.
    */
   [[nodiscard]] SolveResult solve(const std::vector<std::vector<int64_t>>& refs) {
@@ -234,7 +233,7 @@ class MOKPSolver {
   // ── Internal helpers ────────────────────────────────────────────────────
 
   [[nodiscard]] bool validate_refs(const std::vector<std::vector<int64_t>>& refs) const noexcept {
-    if (refs.empty()) {
+    if (refs.empty() || refs.size() >= std::numeric_limits<int>::digits) {
       return false;
     }
     for (const auto& r : refs) {

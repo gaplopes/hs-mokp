@@ -6,8 +6,8 @@
  * For each k, it generates 30 random nondominated reference-point sets (each of size k):
  *   1. Computes the expected solution via exhaustive enumeration over the
  *      known Pareto front (simulate_solution — the validation oracle).
- *   2. Runs each strategy (MIQP, Log, MILP) on the same reference points.
- *   3. Measures wall-clock time and verifies the solver output matches.
+ *   2. Runs each strategy (MIQP, MIQP-Aggregated, Log, Log-Aggregated) on the same reference points.
+ *   3. Reports term counts, model sizes, wall-clock time, and validates HS and solution points.
  *
  * Usage:
  *   ./example_mokp                              # default instance, K=5
@@ -25,6 +25,7 @@
 #include <hs_moco/hs_moco.hpp>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mooutils/indicators.hpp>
 #include <random>
@@ -273,15 +274,18 @@ void print_vec(const std::vector<int64_t>& v) {
   std::cout << ")";
 }
 
-/// Names of the three strategies we compare.
-const std::vector<std::string> STRATEGY_NAMES = {"miqp", "log", "milp"};
+/// Names of the four strategy variants we compare.
+const std::vector<std::string> STRATEGY_NAMES = {
+    "miqp", "miqp_aggregated", "log", "log_aggregated"};
 
 /// Build a fresh strategy by name.
 std::unique_ptr<hs_moco::HSStrategy> make_strategy(
     const std::string& name, hs_moco::NormalizationMethod normalization_method) {
   if (name == "log") return std::make_unique<hs_moco::LogStrategy>();
+  if (name == "log_aggregated") return std::make_unique<hs_moco::LogStrategy>(true);
   if (name == "milp") return std::make_unique<hs_moco::MILPStrategy>();
-  return std::make_unique<hs_moco::MIQPStrategy>(normalization_method);
+  if (name == "miqp_aggregated") return std::make_unique<hs_moco::MIQPStrategy>(normalization_method, true);
+  return std::make_unique<hs_moco::MIQPStrategy>();
 }
 
 /// Build a fresh solver for the given instance + strategy.
@@ -325,6 +329,8 @@ int main(int argc, char* argv[]) {
       if (error != std::errc{} || end != argument.data() + argument.size() || max_k <= 0)
         throw std::invalid_argument("max-k must be a positive integer");
     }
+    if (max_k >= std::numeric_limits<int>::digits)
+      throw std::invalid_argument("max-k exceeds the solver's reference-count limit");
 
     // ────────────────────────────────────────────────────────────────────────
     // 2. Load instance
@@ -368,7 +374,7 @@ int main(int argc, char* argv[]) {
     // ────────────────────────────────────────────────────────────────────────
     // 4. For each k = 1 … max_k, generate refs and compare all strategies
     // ────────────────────────────────────────────────────────────────────────
-    const int num_runs = 1;
+    const int num_runs = 5;
 
     for (int k = 1; k <= max_k; ++k) {
       std::cout << "==== k=" << k << " (" << num_runs << " runs) ";
@@ -394,6 +400,9 @@ int main(int argc, char* argv[]) {
           std::cout << " ";
         }
         std::cout << "\n";
+        std::cout << "  Terms: subsets=" << ((1 << actual_k) - 1)
+                  << " corners=" << hs_moco::detail::inclusion_exclusion_corners(refs).size()
+                  << "\n";
 
         // 4a. Compute expected solution.
         auto t0_sim = std::chrono::steady_clock::now();
@@ -424,6 +433,9 @@ int main(int argc, char* argv[]) {
                     << "  Nodes=" << std::setw(8) << result.node_count
                     << "  Time=" << std::fixed << std::setprecision(1)
                     << std::setw(9) << solve_ms << " ms"
+                    << "  Vars=" << solver.model().get(GRB_IntAttr_NumVars)
+                    << "  Lin=" << solver.model().get(GRB_IntAttr_NumConstrs)
+                    << "  Gen=" << solver.model().get(GRB_IntAttr_NumGenConstrs)
                     << "  f(x*)=";
           print_vec(result.solution_point);
 
@@ -432,11 +444,11 @@ int main(int argc, char* argv[]) {
           // Validate.
           if (result.status == hs_moco::SolveStatus::Optimal ||
               result.status == hs_moco::SolveStatus::InfeasibleOrUnbounded) {
-            if (result.solution_point == exp_point) {
+            if (result.solution_point == exp_point && result.objective_value == exp_hs) {
               std::cout << "  ✔ PASS";
               ++total_pass;
             } else {
-              std::cout << "  ✘ FAIL (expected ";
+              std::cout << "  ✘ FAIL (expected HS=" << exp_hs << " at ";
               print_vec(exp_point);
               std::cout << ")";
               ++total_fail;

@@ -84,8 +84,8 @@
  *  5. IMPLEMENTATION OUTLINE
  * ═══════════════════════════════════════════════════════════════════════════
  *
- *   Step 1 — Precompute inclusion–exclusion subsets: for each non-empty
- *            S ⊆ {0..K-1}, store (max_S r_d, |S|).
+ *   Step 1 — Aggregate inclusion–exclusion weights by component-wise maximum
+ *            reference corner, discarding zero weights.
  *
  *   Step 2 — Generate all combinations-with-replacement of N items taken
  *            m at a time (for objective terms), and all strict combinations
@@ -131,11 +131,13 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "gurobi_c++.h"
 
+#include "hs_moco/core/references.hpp"
 #include "hs_moco/core/strategy.hpp"
 #include "hs_moco/core/types.hpp"
 
@@ -174,7 +176,7 @@ class MILPStrategy final : public HSStrategy {
    * @brief Build the McCormick-linearized polynomial HS objective.
    *
    * Performs six steps (see file-level documentation for the math):
-   *  1. Precompute inclusion–exclusion subsets of reference points.
+   *  1. Aggregate inclusion–exclusion corners of reference points.
    *  2. Generate index tuples (with-replacement for coefficients,
    *     strict for linearization variables).
    *  3. Compute polynomial coefficients via calc_coeff().
@@ -184,6 +186,7 @@ class MILPStrategy final : public HSStrategy {
    *
    * @pre ctx.coeff_matrix must be non-empty (M × N matrix).
    * @throws std::runtime_error if coefficient_matrix is missing.
+   * @throws std::invalid_argument if M is at or above std::numeric_limits<int>::digits.
    */
   void build_objective(GRBModel& model,
                        const StrategyContext& ctx,
@@ -192,29 +195,17 @@ class MILPStrategy final : public HSStrategy {
     const int M = ctx.M;
     const int N = ctx.N;
 
+    if (M >= std::numeric_limits<int>::digits) {
+      throw std::invalid_argument("MILPStrategy: too many objectives for subset enumeration");
+    }
+
     if (ctx.coeff_matrix.empty()) {
       throw std::runtime_error(
           "MILPStrategy requires coefficient_matrix() from the problem.");
     }
 
-    // ── 1. Precompute inclusion-exclusion subsets ─────────────────────────
-    const int K = static_cast<int>(refs.size());
-    struct SubsetMax {
-      std::vector<int64_t> r;
-      int subsetSize;
-    };
-    std::vector<SubsetMax> subsets;
-    for (int mask = 1; mask < (1 << K); ++mask) {
-      std::vector<int64_t> r(M, std::numeric_limits<int64_t>::min());
-      int bits = 0;
-      for (int m = 0; m < K; ++m) {
-        if (mask & (1 << m)) {
-          ++bits;
-          for (int d = 0; d < M; ++d) r[d] = std::max(r[d], refs[m][d]);
-        }
-      }
-      subsets.push_back({std::move(r), bits});
-    }
+    // ── 1. Aggregate inclusion-exclusion corners ──────────────────────────
+    const auto corners = detail::inclusion_exclusion_corners(refs);
 
     // ── 2. Combination generators ────────────────────────────────────────
     auto get_combinations_with_replacement = [](int n, int m) {
@@ -359,9 +350,8 @@ class MILPStrategy final : public HSStrategy {
         if (m == M) {
           coeff_sum = calc_coeff(t, zero_r);
         } else {
-          for (const auto& sub : subsets) {
-            int sign_sub = (sub.subsetSize % 2 == 1) ? +1 : -1;
-            coeff_sum += sign_sub * calc_coeff(t, sub.r);
+          for (const auto& [corner, weight] : corners) {
+            coeff_sum += weight * calc_coeff(t, corner);
           }
         }
         coeff_sum *= sign_M;
@@ -378,9 +368,8 @@ class MILPStrategy final : public HSStrategy {
     // Constant term (m = 0)
     long long const_sum = 0;
     int sign_M_0 = (M % 2 == 0) ? +1 : -1;
-    for (const auto& sub : subsets) {
-      int sign_sub = (sub.subsetSize % 2 == 1) ? +1 : -1;
-      const_sum += sign_sub * calc_coeff({}, sub.r);
+    for (const auto& [corner, weight] : corners) {
+      const_sum += weight * calc_coeff({}, corner);
     }
     obj += sign_M_0 * const_sum;
 

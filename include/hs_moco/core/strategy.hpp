@@ -157,8 +157,8 @@ class HSStrategy {
   /**
    * @brief Apply strategy-specific parameter overrides to @p opts.
    *
-   * Called once during solver construction.  Strategies that need NonConvex=2
-   * or FuncNonlinear=1 should set the appropriate flags here.
+   * Called once during solver construction, before creating the environment
+   * and model.
    */
   virtual void configure_options(struct SolverOptions& opts) const {}
 

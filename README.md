@@ -23,7 +23,7 @@ $$
 
 HS-MOKP encodes this objective as a Mixed-Integer Program (MIP)
 specifically parameterized for the Multiobjective Knapsack Problem (MOKP),
-and provides three alternative formulation strategies,
+and provides three formulation strategies, with optional corner reduction in MIQP and Log,
 trading off model size and numerical behaviour directly tailored for Gurobi formulation patterns.
 See the [Strategies](#strategies) section below for details.
 
@@ -42,27 +42,68 @@ See the [Strategies](#strategies) section below for details.
 
 ## Strategies
 
-### 1. MIQP — Nonlinear Product
-
-The most conceptually simple strategy. Each product
-$\prod_d (f_d(x) - r_d)$ is defined by one **nonlinear general constraint**
-using `addGenConstrNL`. The C++ expression tree has one n-ary multiplication
-node over the bound factors, and Gurobi handles the internal product formulation.
-For $M \geq 2$, each subset adds $M+1$ variables, $M$ linear constraints, and
-one nonlinear general constraint.
-
-The balanced binary-tree helper remains in `miqp.hpp` for comparison. It uses
-pairwise bilinear equalities:
+MIQP and Log with corner reduction enabled, and MILP, aggregate inclusion–exclusion
+weights by the component-wise maximum reference point. Identical corners combine,
+and zero weights disappear. MIQP and Log default to subset enumeration:
 
 $$
-\begin{aligned}
-p_{01}   &= t_0 \cdot t_1, \quad p_{23} = t_2 \cdot t_3, \quad \ldots \\
-p_{0123} &= p_{01} \cdot p_{23}, \quad \ldots \\
-P        &= \text{final product variable}
-\end{aligned}
+\text{HS}(x,R) = \sum_c w_c \prod_d (f_d(x)-c_d).
 $$
 
-MIQP defaults to `NormalizationMethod::None`, leaving factors unscaled.
+This preprocessing builds intersections incrementally, without enumerating all
+$2^K-1$ reference subsets. Duplicate or contained boxes add no retained terms.
+The number of distinct corners can still grow rapidly with many objectives.
+
+Every reference $r$ defines a box $[r,f(x)]$, since the solver requires $f(x)$
+to strictly dominate all references. Boxes share an upper corner, so their
+intersection has lower corner $\max(r^1,r^2)$, computed coordinate by coordinate.
+Different subsets with the same lower corner define the same product for every
+feasible $x$; adding their signs therefore preserves the entire objective.
+
+For a three-objective example, take the mutually nondominated references
+$A=(1,1,0)$, $B=(1,0,1)$, and $C=(0,1,1)$:
+
+| Subsets | Maximum corner | Combined weight |
+|---|---|---:|
+| $A$ | $(1,1,0)$ | $+1$ |
+| $B$ | $(1,0,1)$ | $+1$ |
+| $C$ | $(0,1,1)$ | $+1$ |
+| $AB$, $AC$, $BC$, $ABC$ | $(1,1,1)$ | $-1-1-1+1=-2$ |
+
+Seven subset terms reduce to four nonzero corner terms. At $f(x)=(2,2,2)$,
+each singleton box has volume $2$ and every intersection has volume $1$:
+both expressions yield $2+2+2-2\cdot1=4$.
+
+`inclusion_exclusion_corners` builds this map incrementally. When adding a new
+box, it retains the old map, adds the box with weight $+1$, then subtracts each
+weighted intersection with the old map. This is the identity
+$\operatorname{vol}(U\cup B)=\operatorname{vol}(U)+\operatorname{vol}(B)-\operatorname{vol}(U\cap B)$.
+Weights are signed integer sums, not necessarily just $+1$ or $-1$.
+
+### 1. MIQP — Original Nonlinear Product
+
+`MIQPStrategy` in `strategies/miqp.hpp` preserves the original formulation.
+It enumerates all $2^K-1$ nonempty reference subsets and builds a product for
+each one. For $M\geq2$, each subset adds $M+1$ variables, $M$ linear constraints,
+and one nonlinear general constraint. Its balanced binary-tree helper is also
+retained unchanged.
+
+Pass `true` as the second constructor argument to aggregate identical corners
+before building products:
+
+```cpp
+auto aggregated_strategy = std::make_unique<hs_moco::MIQPStrategy>(
+    hs_moco::NormalizationMethod::None, true);
+```
+
+This opt-in mode uses the same unshifted factors and product helper as the
+original formulation. Each retained corner contributes its full signed integer
+weight. With $C$ nonzero corners and $M\geq2$, it adds $(M+1)C$ variables,
+$MC$ linear equalities, and $C$ nonlinear constraints. The default remains
+`false`, preserving subset enumeration. The MOKP example compares both modes
+on the same references and reports term counts, model sizes, and solve times.
+
+Both MIQP modes default to `NormalizationMethod::None`, leaving factors unscaled.
 Per-objective Dantzig upper bounds are computed once during solver construction
 from the fractional knapsack relaxation. Selecting another method uses these
 bounds for normalization. With `PrecisionOptimal` and `abs_tol = 1e-8`,
@@ -74,11 +115,13 @@ The normalization tolerance is at least ten times the model's effective
 Upper bounds alone do not enable normalization. All methods return HS in its original units.
 
 `strategies/norm.hpp` provides `precision_optimal_norm`, `upper_bound_norm`,
-and `reference_gap_norm`. Select the MIQP method in its constructor:
+and `reference_gap_norm`. Both MIQP modes accept the same normalization method:
 
 ```cpp
 auto strategy = std::make_unique<hs_moco::MIQPStrategy>(
     hs_moco::NormalizationMethod::ReferenceGap);
+auto aggregated_strategy = std::make_unique<hs_moco::MIQPStrategy>(
+    hs_moco::NormalizationMethod::ReferenceGap, true);
 ```
 
 `UpperBound` divides by each upper bound, and `ReferenceGap` scales the
@@ -93,9 +136,22 @@ $$
 \log \prod_d (f_d - r_d) = \sum_d \log(f_d - r_d)
 $$
 
-For $k = 1$ reference point, this is the complete formulation. 
+For $k = 1$ reference point, this is the complete formulation. By default,
+`LogStrategy` enumerates every nonempty reference subset, as MIQP does. Pass
+`true` to enable the same corner-reduction approach:
 
-For $k \geq 2$, inclusion–exclusion requires computing
+```cpp
+auto strategy = std::make_unique<hs_moco::LogStrategy>();
+auto aggregated_strategy = std::make_unique<hs_moco::LogStrategy>(true);
+```
+
+The default `reduce_corners` value is `false`. Both modes use the same log/LSE
+construction and shared gap/log pairs. With reduction enabled, multiple references
+that reduce to one retained corner use the single-reference formulation.
+The MOKP example compares both Log modes alongside both MIQP modes.
+
+For multiple retained corners, each sum of logs includes $\log|w_c|$ to account
+for the aggregated weight. Inclusion–exclusion requires computing
 $\log(A - B)$ where $A$ and $B$ are sums of exponentials. This uses the
 numerically stable identity:
 
@@ -108,6 +164,13 @@ Each $\log A$ and $\log B$ is computed via the **max-shift LSE trick**:
 $$
 \text{LSE}(s_0, \ldots, s_n) = \max(s) + \log\!\Bigl(\sum_i \exp(s_i - \max(s))\Bigr)
 $$
+
+Gap variables and their logarithms are shared by objective index and reference
+coordinate within each solve. There are at most $MK$ distinct gap/log pairs for
+$M$ objectives and $K$ references, regardless of the retained corner count.
+A singleton LSE returns its input directly. The final objective maximizes
+$L_\text{pos}+\log(1-\exp(L_\text{neg}-L_\text{pos}))$ without another resultant
+variable or defining equality.
 
 ### 3. MILP — McCormick Linearization
 
@@ -143,9 +206,9 @@ variables and constraints are retained across solves with different references.
 ## Features
 
 - **Built exclusively on top of the Gurobi C++ API.**
-- **Three MIP formulation strategies for MOKP instances:** 
-  1. MIQP (nonlinear product)
-  2. Logarithm transformation and Log-Sum-Exp (LSE) reformulation
+- **Three MIP formulation strategies for MOKP instances:**
+  1. MIQP (nonlinear product, with optional corner reduction)
+  2. Logarithm transformation and Log-Sum-Exp (LSE) reformulation (with optional corner reduction)
   3. MILP (McCormick linearization)
 - **Build once, solve many times:** separate model construction from solving, allowing efficient re-use across multiple reference-point sets
 - **Pure header-only:** no compiled library, just `#include <hs_moco/hs_moco.hpp>`
@@ -206,7 +269,7 @@ file.
 ./build/release/examples/example_mokp /path/to/instance.in 3
 ```
 
-The example compares all three strategies (MIQP, Log, and MILP) for
+The example compares MIQP, MIQP-Aggregated, Log, and Log-Aggregated for
 reference-point set sizes \(k = 1, \ldots, K\). For each \(k\), it generates 30
 (default) random non-dominated reference-point sets (each of size \(k\)),
 measures wall-clock time, and validates each result against exhaustive
@@ -260,6 +323,34 @@ if (result.status == hs_moco::SolveStatus::Optimal) {
     std::cout << "HS = " << result.objective_value << "\n";
 }
 ```
+
+Set additional Gurobi parameters through `SolverOptions::gurobi_params` before
+constructing the solver. Both names and values are strings:
+
+```cpp
+hs_moco::SolverOptions opts;
+opts.gurobi_params = {
+    {"Threads", "8"},
+    {"MIPFocus", "1"},
+    {"TimeLimit", "60"},
+    {"MIPGap", "1e-4"},
+    {"LogFile", "gurobi.log"},
+};
+```
+
+Entries override existing option fields and strategy defaults during construction.
+When building its objective, MIQP sets `NonConvex=2` and Log sets `FuncNonlinear=1`.
+These strategy requirements override conflicting `gurobi_params` entries.
+On every solve, the Log strategy sets the model's `FeasibilityTol` to `1e-9` for
+`k=1` and `1e-6` for `k>1`, regardless of `feasibility_tol` or `gurobi_params`.
+
+Parameters apply before environment startup and model creation, so startup
+parameters such as `ThreadLimit` are supported. Gurobi validates names, values,
+and applicability; invalid entries throw `GRBException` during construction.
+Parameter compatibility with the chosen strategy remains Gurobi's responsibility.
+
+The existing `SolveStatus` mapping is unchanged. Additional stopping criteria can
+produce termination statuses currently mapped to `SolveStatus::Error`.
 
 
 ## Consuming in Your CMake Project
