@@ -1,0 +1,22 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hs-moco"
+version = "0.1.0"
+description = "Hypervolume scalarization solvers for the multiobjective knapsack problem"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[tool.scikit-build]
+cmake.version = ">=3.21"
+wheel.packages = []
+install.components = ["python"]
+sdist.exclude = ["docs/**", "output/**"]
+
+[tool.scikit-build.cmake.define]
+HS_MOCO_BUILD_PYTHON = true
+HS_MOCO_BUILD_EXAMPLES = false

@@ -103,30 +103,8 @@ $MC$ linear equalities, and $C$ nonlinear constraints. The default remains
 `false`, preserving subset enumeration. The MOKP example compares both modes
 on the same references and reports term counts, model sizes, and solve times.
 
-Both MIQP modes default to `NormalizationMethod::None`, leaving factors unscaled.
-Per-objective Dantzig upper bounds are computed once during solver construction
-from the fractional knapsack relaxation. Selecting another method uses these
-bounds for normalization. With `PrecisionOptimal` and `abs_tol = 1e-8`,
-the modeled objective is `1e-8 * HS`; returned results restore the original HS units.
-The normalization tolerance is at least ten times the model's effective
-`FeasibilityTol` (normally `1e-9`).
-`PrecisionOptimal` leaves the formulation unscaled for nonpositive bounds.
-
-Upper bounds alone do not enable normalization. All methods return HS in its original units.
-
-`strategies/norm.hpp` provides `precision_optimal_norm`, `upper_bound_norm`,
-and `reference_gap_norm`. Both MIQP modes accept the same normalization method:
-
-```cpp
-auto strategy = std::make_unique<hs_moco::MIQPStrategy>(
-    hs_moco::NormalizationMethod::ReferenceGap);
-auto aggregated_strategy = std::make_unique<hs_moco::MIQPStrategy>(
-    hs_moco::NormalizationMethod::ReferenceGap, true);
-```
-
-`UpperBound` divides by each upper bound, and `ReferenceGap` scales the
-reference-gap bounding box to volume `1e4`. These choices can produce different
-numerical errors despite preserving the exact mathematical maximizer.
+Both MIQP modes support optional [normalization](#normalization) and default to
+`NormalizationMethod::None`, leaving factors unscaled.
 
 ### 2.Logarithm transformation and Log-Sum-Exp (LSE) reformulation
 
@@ -172,6 +150,14 @@ A singleton LSE returns its input directly. The final objective maximizes
 $L_\text{pos}+\log(1-\exp(L_\text{neg}-L_\text{pos}))$ without another resultant
 variable or defining equality.
 
+`LogStrategy` does not apply coordinate normalization. Logarithms already
+compress product magnitudes, and max-shift LSE controls the exponential range.
+For fixed positive divisors $n_d$ shared across all reference points,
+normalization subtracts the same constant $\sum_d\log n_d$ from every subset
+log. Therefore, $L_\text{neg}-L_\text{pos}$ is unchanged: normalization does not
+remove cancellation in the final subtraction. It can still affect the numerical
+conditioning of the gap variables entering the logarithms.
+
 ### 3. MILP — McCormick Linearization
 
 Expands the product $\prod_d (f_d(x) - r_d)$ into a **multilinear
@@ -203,6 +189,44 @@ variables and constraints are retained across solves with different references.
 > model size analysis, and implementation steps. Refer to the file-level
 > docstrings for a comprehensive deep-dive beyond the overview above.
 
+## Normalization
+
+Normalization controls the numerical scaling of MIQP product factors. Both
+MIQP modes accept the same `hs_moco::NormalizationMethod` choices:
+
+| Method | Scaling |
+|---|---|
+| `None` (default) | Leaves factors unscaled. |
+| `PrecisionOptimal` | Scales factors so the modeled objective is `abs_tol * HS`. |
+| `UpperBound` | Divides each factor by its objective's upper bound. |
+| `ReferenceGap` | Scales the reference-gap bounding box to volume `1e4`. |
+
+Per-objective Dantzig upper bounds are computed once during solver construction
+from the fractional knapsack relaxation. Selecting a method other than `None`
+uses these bounds for normalization; upper bounds alone do not enable it.
+All methods preserve the exact mathematical maximizer and return HS in its
+original units, but can produce different numerical errors.
+
+For `PrecisionOptimal`, `abs_tol = max(1e-8, 10 * FeasibilityTol)`, using the
+model's effective feasibility tolerance. With the normal MIQP `FeasibilityTol`
+of `1e-9`, the modeled objective is `1e-8 * HS`; returned results restore the
+original HS units. Nonpositive bounds leave this formulation unscaled.
+
+Select a method when constructing either MIQP mode:
+
+```cpp
+auto strategy = std::make_unique<hs_moco::MIQPStrategy>(
+    hs_moco::NormalizationMethod::ReferenceGap);
+auto aggregated_strategy = std::make_unique<hs_moco::MIQPStrategy>(
+    hs_moco::NormalizationMethod::ReferenceGap, true);
+```
+
+[`strategies/norm.hpp`](include/hs_moco/strategies/norm.hpp) provides
+`precision_optimal_norm`, `upper_bound_norm`, and `reference_gap_norm`.
+Normalization is configurable only for MIQP. `LogStrategy` does not apply
+coordinate normalization; its numerical scaling is described in the Log
+strategy subsection above.
+
 ## Features
 
 - **Built exclusively on top of the Gurobi C++ API.**
@@ -212,6 +236,7 @@ variables and constraints are retained across solves with different references.
   3. MILP (McCormick linearization)
 - **Build once, solve many times:** separate model construction from solving, allowing efficient re-use across multiple reference-point sets
 - **Pure header-only:** no compiled library, just `#include <hs_moco/hs_moco.hpp>`
+- **Optional Python bindings:** call the same solvers from scripts and notebooks
 
 ## Requirements
 
@@ -352,6 +377,88 @@ Parameter compatibility with the chosen strategy remains Gurobi's responsibility
 The existing `SolveStatus` mapping is unchanged. Additional stopping criteria can
 produce termination statuses currently mapped to `SolveStatus::Error`.
 
+
+## Python Bindings
+
+The Python module uses the existing C++ implementation, including repeated-solve
+model reuse. It requires Python 3.10 or newer, a C++20 compiler, CMake 3.21 or
+newer, and a full Gurobi 12 or newer installation with a suitable license.
+Installing `gurobipy` alone does not provide the required C++ headers and libraries.
+
+From an activated Python environment, install from the repository root:
+
+```bash
+export GUROBI_HOME=/opt/gurobi1203/linux64  # Adjust to your installation
+python -m pip install .
+```
+
+Pip installs the build dependencies (`pybind11` and `scikit-build-core`) in an
+isolated build environment. The Python build disables the examples, so their
+dependencies and benchmark data are not downloaded. The C++ build remains
+unchanged unless `HS_MOCO_BUILD_PYTHON=ON` is explicitly enabled.
+
+The installed extension still needs the linked Gurobi runtime. Local Unix builds
+retain the Gurobi library directory in their runtime search path. On Windows,
+add the Gurobi `bin` directory to `PATH` before starting Python or Jupyter.
+Wheels built this way depend on the external Gurobi installation; they are not
+self-contained distributions.
+
+```python
+import hs_moco as hs
+
+items = [
+    hs.MOKPItem(idx=0, weight=2, values=[8, 3, 5]),
+    hs.MOKPItem(idx=1, weight=3, values=[4, 7, 6]),
+]
+
+options = hs.SolverOptions()
+options.time_limit = 60.0
+options.gurobi_params = {"Threads": "2", "MIPGap": "1e-4"}
+
+solver = hs.MOKPSolver(
+    items,
+    capacity=5,
+    strategy="miqp",
+    options=options,
+    reduce_corners=True,
+)
+
+result = solver.solve([[0, 0, 0]])
+if result.status == hs.SolveStatus.Optimal:
+    print("HS:", result.objective_value)
+    print("Objectives:", result.solution_point)
+    print("Decisions:", result.decision_values)
+
+# Reuse the same model with another set of reference points.
+result = solver.solve([[1, 1, 1], [2, 0, 1]])
+```
+
+`strategy` accepts `"miqp"` (the default), `"log"`, or `"milp"`.
+`reduce_corners=True` enables aggregation for MIQP and Log; MILP always aggregates
+corners and does not accept this override. MIQP also accepts
+`normalization=hs.NormalizationMethod.PrecisionOptimal`, `UpperBound`, or
+`ReferenceGap`; the default is `hs.NormalizationMethod.None_`.
+Normalization is only configurable for MIQP.
+
+All `SolverOptions` fields listed in the C++ API are writable from Python.
+Items and options are copied when constructing a solver; assign whole lists or
+dictionaries when changing `values` or `gurobi_params`. Python integers must fit
+the native integer types: item indices use 32 bits; weights, capacity, objective
+values, and reference coordinates use 64 bits.
+
+Results expose read-only `status`, `objective_value`, `node_count`,
+`solution_point`, and `decision_values`. Statuses match the C++ API:
+`Optimal`, `TimeLimitReached`, `InfeasibleOrUnbounded`, `NodeLimitReached`, and
+`Error`. Incumbent and bound fields retain the C++ status-dependent behavior.
+Invalid reference shapes and solve-time failures return `SolveStatus.Error`.
+Invalid constructor arguments raise Python exceptions; native Gurobi construction
+errors raise `RuntimeError` with the Gurobi error code and message.
+
+The solver exposes read-only `num_objectives`, `num_variables`, and
+`strategy_name` properties. Calls to `solve` release Python's GIL. Each solver
+owns mutable native state: do not call `solve` concurrently on the same instance.
+Use a separate solver for each concurrent task. Gurobi models and handles remain
+internal to the extension.
 
 ## Consuming in Your CMake Project
 

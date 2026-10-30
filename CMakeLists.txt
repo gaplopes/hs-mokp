@@ -20,6 +20,7 @@ else()
 endif()
 
 option(HS_MOCO_BUILD_EXAMPLES "Build example executables" ${_HS_MOCO_IS_TOPLEVEL})
+option(HS_MOCO_BUILD_PYTHON "Build Python bindings" OFF)
 
 # ── Find Gurobi ─────────────────────────────────────────────────────────────
 
@@ -45,6 +46,24 @@ target_link_libraries(hs_moco
   INTERFACE
     GUROBI::GurobiCXX
 )
+
+# ── Python bindings ─────────────────────────────────────────────────────────
+
+if(HS_MOCO_BUILD_PYTHON)
+  find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+  find_package(pybind11 CONFIG REQUIRED)
+
+  pybind11_add_module(hs_moco_python python/bindings.cpp)
+  target_link_libraries(hs_moco_python PRIVATE hs_moco::hs_moco)
+  set_target_properties(hs_moco_python PROPERTIES
+    OUTPUT_NAME hs_moco
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+  )
+  install(TARGETS hs_moco_python
+    LIBRARY DESTINATION . COMPONENT python
+    RUNTIME DESTINATION . COMPONENT python
+  )
+endif()
 
 # ── Examples ─────────────────────────────────────────────────────────────────
 
