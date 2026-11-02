@@ -41,6 +41,14 @@ PYBIND11_MODULE(hs_moco, m) {
       .value("UpperBound", NormalizationMethod::UpperBound)
       .value("ReferenceGap", NormalizationMethod::ReferenceGap);
 
+  py::class_<Normalization>(m, "Normalization")
+      .def(py::init<NormalizationMethod, double>(),
+           py::arg("method") = NormalizationMethod::None,
+           py::arg("objective_scale") = 1e-8)
+      .def_property_readonly("method", &Normalization::method)
+      .def_property_readonly("objective_scale", &Normalization::objective_scale);
+  py::implicitly_convertible<NormalizationMethod, Normalization>();
+
   py::class_<MOKPItem>(m, "MOKPItem")
       .def(py::init<int32_t, int64_t, std::vector<int64_t>>(),
            py::arg("idx"), py::arg("weight"), py::arg("values"))
@@ -63,20 +71,22 @@ PYBIND11_MODULE(hs_moco, m) {
       .def_readonly("objective_value", &SolveResult::objective_value)
       .def_readonly("node_count", &SolveResult::node_count)
       .def_readonly("solution_point", &SolveResult::solution_point)
-      .def_readonly("decision_values", &SolveResult::decision_values);
+      .def_readonly("decision_values", &SolveResult::decision_values)
+      .def_readonly("recomputed_hs", &SolveResult::recomputed_hs);
 
   py::class_<MOKPSolver>(m, "MOKPSolver")
       .def(py::init([](std::vector<MOKPItem> items, int64_t capacity,
                        const std::string& strategy, SolverOptions options,
-                       bool reduce_corners, NormalizationMethod normalization) {
+                       bool reduce_corners, Normalization normalization) {
         if (!items.empty() && items.front().values.empty())
           throw std::invalid_argument("items must have at least one objective");
 
         std::unique_ptr<HSStrategy> selected_strategy;
         if (strategy == "miqp") {
-          selected_strategy = std::make_unique<MIQPStrategy>(normalization, reduce_corners);
+          selected_strategy = std::make_unique<MIQPStrategy>(
+              normalization, reduce_corners);
         } else {
-          if (normalization != NormalizationMethod::None)
+          if (normalization.method() != NormalizationMethod::None)
             throw std::invalid_argument("normalization is only supported by 'miqp'");
           if (strategy == "log") {
             selected_strategy = std::make_unique<LogStrategy>(reduce_corners);
@@ -95,11 +105,13 @@ PYBIND11_MODULE(hs_moco, m) {
       }), py::arg("items"), py::arg("capacity"), py::kw_only(),
           py::arg("strategy") = "miqp", py::arg("options") = SolverOptions{},
           py::arg("reduce_corners") = false,
-          py::arg("normalization") = NormalizationMethod::None,
+          py::arg("normalization") = Normalization{},
           "Build a reusable solver. Items and options are copied at construction.")
       .def("solve", &MOKPSolver::solve, py::arg("refs"),
+           py::arg("recompute_hs") = false,
            py::call_guard<py::gil_scoped_release>(),
-           "Solve for integer reference points. Do not call concurrently on the same solver.")
+           "Solve for integer reference points; optionally reevaluate HS from solution_point. "
+           "Do not call concurrently on the same solver.")
       .def_property_readonly("num_objectives", &MOKPSolver::num_objectives)
       .def_property_readonly("num_variables", &MOKPSolver::num_variables)
       .def_property_readonly("strategy_name", &MOKPSolver::strategy_name);

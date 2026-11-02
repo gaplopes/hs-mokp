@@ -17,12 +17,16 @@
  * nonlinear equality using addGenConstrNL (Gurobi 12 or newer).
  * Gurobi handles the product through spatial branch-and-bound.
  * The balanced bilinear implementation is retained below and uses NonConvex=2.
- * PrecisionOptimal normalization divides each factor by
- * norm_d = ub_d / (abs_tol · Π_i ub_i)^(1/M), using Dantzig upper bounds.
- * abs_tol = max(1e-8, 10 · FeasibilityTol),
- * so the modeled objective is abs_tol · HS;
+ * PrecisionOptimal is a repository-specific scaling heuristic, not a claim of
+ * optimal scaling; its enum name is retained for compatibility. It divides
+ * each factor by
+ * norm_d = ub_d / (alpha · Π_i ub_i)^(1/M), using Dantzig upper bounds.
+ * alpha is the Normalization object's objective_scale (default 1e-8), independent of
+ * FeasibilityTol, so the modeled objective is alpha · HS.
+ * This scale factor is not an HS error bound or an optimization-gap
+ * tolerance; MIPGap and MIPGapAbs remain separate stopping criteria.
  * decode_objective() restores the original units. Nonpositive bounds leave
- * PrecisionOptimal formulation unscaled.
+ * this formulation unscaled.
  * NormalizationMethod::None is the default and leaves factors unscaled.
  * Select a normalization method from strategies/norm.hpp in the constructor.
  *
@@ -130,9 +134,8 @@ namespace hs_moco {
  */
 class MIQPStrategy final : public HSStrategy {
  public:
-  MIQPStrategy() = default;
-  explicit MIQPStrategy(NormalizationMethod method = NormalizationMethod::None, bool reduce_corners = false)
-      : normalization_method_(method), reduce_corners_(reduce_corners) {}
+  explicit MIQPStrategy(Normalization normalization = {}, bool reduce_corners = false)
+      : normalization_(normalization), reduce_corners_(reduce_corners) {}
 
   [[nodiscard]] std::string name() const override {
     return reduce_corners_ ? "MIQP-Aggregated" : "MIQP";
@@ -178,9 +181,8 @@ class MIQPStrategy final : public HSStrategy {
     const int M = ctx.M;
     const int k = static_cast<int>(refs.size());
     std::vector<double> norm(M, 1.0);
-    if (normalization_method_ != NormalizationMethod::None) {
-      const double abs_tol = std::max(1e-8, 10.0 * model.get(GRB_DoubleParam_FeasibilityTol));
-      norm = normalization_factors(normalization_method_, ctx.objective_upper_bounds, refs, abs_tol);
+    if (normalization_.method() != NormalizationMethod::None) {
+      norm = normalization_.factors(ctx.objective_upper_bounds, refs);
     }
     double log_multiplier = 0;
     for (double value : norm) log_multiplier += std::log(value);
@@ -231,7 +233,7 @@ class MIQPStrategy final : public HSStrategy {
   }
 
  private:
-  NormalizationMethod normalization_method_ = NormalizationMethod::None;
+  Normalization normalization_;
   bool reduce_corners_ = false;
   double objective_multiplier_ = 1.0;
 

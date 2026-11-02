@@ -50,6 +50,7 @@
 
 #include "gurobi_c++.h"
 #include "hs_moco/problems/mokp.hpp"
+#include "hs_moco/core/hypervolume.hpp"
 #include "hs_moco/core/strategy.hpp"
 #include "hs_moco/core/types.hpp"
 
@@ -146,9 +147,12 @@ class MOKPSolver {
    *
    * @param refs  Non-empty vector of reference points (each M-dimensional).
    *              Counts at or above std::numeric_limits<int>::digits return Error.
+   * @param recompute_hs  Reevaluate HS from the returned solution_point
+   *                      with checked integers; failures are logged and leave it unset.
    * @return SolveResult with status, objective value, and solution point.
    */
-  [[nodiscard]] SolveResult solve(const std::vector<std::vector<int64_t>>& refs) {
+  [[nodiscard]] SolveResult solve(const std::vector<std::vector<int64_t>>& refs,
+                                  bool recompute_hs = false) {
     SolveResult result;
     result.solution_point.assign(M_, 0);
 
@@ -177,6 +181,25 @@ class MOKPSolver {
       // ── 5. Extract result ──────────────────────────────────────────────
       int status = model_->get(GRB_IntAttr_Status);
       result = extract_result(status);
+
+      if (recompute_hs) {
+        try {
+          if (model_->get(GRB_IntAttr_SolCount) > 0) {
+            // Other statuses can retain an incumbent without extracting its point.
+            if (status != GRB_OPTIMAL && status != GRB_TIME_LIMIT) {
+              for (int i = 0; i < M_; ++i)
+                result.solution_point[i] =
+                    static_cast<int64_t>(std::llround(obj_vars_[i].get(GRB_DoubleAttr_X)));
+            }
+            result.recomputed_hs = detail::hypervolume(result.solution_point, refs);
+          }
+        } catch (const GRBException& e) {
+          std::cerr << "[MOKPSolver] HS recomputation Gurobi error " << e.getErrorCode()
+                    << ": " << e.getMessage() << std::endl;
+        } catch (const std::exception& e) {
+          std::cerr << "[MOKPSolver] HS recomputation error: " << e.what() << std::endl;
+        }
+      }
 
     } catch (GRBException& e) {
       std::cerr << "[MOKPSolver] Gurobi error " << e.getErrorCode()

@@ -4,13 +4,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace hs_moco {
 
 enum class NormalizationMethod {
   None,
-  PrecisionOptimal,
+  PrecisionOptimal,  ///< Legacy name for a repository-specific objective-scaling heuristic.
   UpperBound,
   ReferenceGap,
 };
@@ -43,12 +44,15 @@ inline std::vector<double> upper_bound_norm(const std::vector<double>& upper_bou
   return detail::norm_with_log_volume(upper_bound, 0.0);
 }
 
-/// Divide by U_i / (abs_tol * product(U))^(1/M), giving modeled HS = abs_tol * HS.
+/// Repository-specific heuristic; `objective_scale` is a positive objective scale
+/// factor, not a claim of optimal scaling or an HS error/gap guarantee.
+/// The returned divisors make the modeled objective `objective_scale * HS`.
 inline std::vector<double> precision_optimal_norm(const std::vector<double>& upper_bound,
-                                                 double abs_tol = 1e-8) {
-  if (!detail::valid_norm_bounds(upper_bound) || !(abs_tol > 0) || !std::isfinite(abs_tol))
+                                                 double objective_scale = 1e-8) {
+  if (!detail::valid_norm_bounds(upper_bound) || !(objective_scale > 0) ||
+      !std::isfinite(objective_scale))
     return std::vector<double>(upper_bound.size(), 1.0);
-  double log_volume = std::log(abs_tol);
+  double log_volume = std::log(objective_scale);
   for (double value : upper_bound) log_volume += std::log(value);
   return detail::norm_with_log_volume(upper_bound, log_volume);
 }
@@ -77,12 +81,12 @@ inline std::vector<double> normalization_factors(
     NormalizationMethod method,
     const std::vector<double>& upper_bound,
     const std::vector<std::vector<int64_t>>& refs,
-    double abs_tol = 1e-8) {
+    double objective_scale = 1e-8) {
   switch (method) {
     case NormalizationMethod::None:
       return std::vector<double>(upper_bound.size(), 1.0);
     case NormalizationMethod::PrecisionOptimal:
-      return precision_optimal_norm(upper_bound, abs_tol);
+      return precision_optimal_norm(upper_bound, objective_scale);
     case NormalizationMethod::UpperBound:
       return upper_bound_norm(upper_bound);
     case NormalizationMethod::ReferenceGap:
@@ -90,6 +94,30 @@ inline std::vector<double> normalization_factors(
   }
   return std::vector<double>(upper_bound.size(), 1.0);
 }
+
+/// A normalization method and its validated objective scale (used by PrecisionOptimal).
+class Normalization {
+ public:
+  Normalization(NormalizationMethod method = NormalizationMethod::None,
+                double objective_scale = 1e-8)
+      : method_(method), objective_scale_(objective_scale) {
+    if (!(objective_scale_ > 0) || !std::isfinite(objective_scale_))
+      throw std::invalid_argument("objective_scale must be positive and finite");
+  }
+
+  [[nodiscard]] NormalizationMethod method() const noexcept { return method_; }
+  [[nodiscard]] double objective_scale() const noexcept { return objective_scale_; }
+
+  [[nodiscard]] std::vector<double> factors(
+      const std::vector<double>& upper_bound,
+      const std::vector<std::vector<int64_t>>& refs) const {
+    return normalization_factors(method_, upper_bound, refs, objective_scale_);
+  }
+
+ private:
+  NormalizationMethod method_;
+  double objective_scale_;
+};
 
 }  // namespace hs_moco
 

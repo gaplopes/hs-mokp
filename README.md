@@ -104,7 +104,8 @@ $MC$ linear equalities, and $C$ nonlinear constraints. The default remains
 on the same references and reports term counts, model sizes, and solve times.
 
 Both MIQP modes support optional [normalization](#normalization) and default to
-`NormalizationMethod::None`, leaving factors unscaled.
+`hs_moco::Normalization{}` (`NormalizationMethod::None`), leaving factors
+unscaled.
 
 ### 2.Logarithm transformation and Log-Sum-Exp (LSE) reformulation
 
@@ -192,12 +193,13 @@ variables and constraints are retained across solves with different references.
 ## Normalization
 
 Normalization controls the numerical scaling of MIQP product factors. Both
-MIQP modes accept the same `hs_moco::NormalizationMethod` choices:
+MIQP modes accept an `hs_moco::Normalization` value containing the method and
+`objective_scale`:
 
 | Method | Scaling |
 |---|---|
 | `None` (default) | Leaves factors unscaled. |
-| `PrecisionOptimal` | Scales factors so the modeled objective is `abs_tol * HS`. |
+| `PrecisionOptimal` | Repository-specific heuristic scaling the modeled objective by `objective_scale`. |
 | `UpperBound` | Divides each factor by its objective's upper bound. |
 | `ReferenceGap` | Scales the reference-gap bounding box to volume `1e4`. |
 
@@ -207,18 +209,16 @@ uses these bounds for normalization; upper bounds alone do not enable it.
 All methods preserve the exact mathematical maximizer and return HS in its
 original units, but can produce different numerical errors.
 
-For `PrecisionOptimal`, `abs_tol = max(1e-8, 10 * FeasibilityTol)`, using the
-model's effective feasibility tolerance. With the normal MIQP `FeasibilityTol`
-of `1e-9`, the modeled objective is `1e-8 * HS`; returned results restore the
-original HS units. Nonpositive bounds leave this formulation unscaled.
-
 Select a method when constructing either MIQP mode:
 
 ```cpp
 auto strategy = std::make_unique<hs_moco::MIQPStrategy>(
-    hs_moco::NormalizationMethod::ReferenceGap);
+    hs_moco::Normalization{hs_moco::NormalizationMethod::ReferenceGap});
 auto aggregated_strategy = std::make_unique<hs_moco::MIQPStrategy>(
-    hs_moco::NormalizationMethod::ReferenceGap, true);
+    hs_moco::NormalizationMethod::ReferenceGap, true);  // enum shorthand
+auto norm = hs_moco::Normalization{
+    hs_moco::NormalizationMethod::PrecisionOptimal, 1e-6};
+auto precision_strategy = std::make_unique<hs_moco::MIQPStrategy>(norm, false);
 ```
 
 [`strategies/norm.hpp`](include/hs_moco/strategies/norm.hpp) provides
@@ -347,7 +347,27 @@ auto result = solver.solve({{0, 0, 0}});
 if (result.status == hs_moco::SolveStatus::Optimal) {
     std::cout << "HS = " << result.objective_value << "\n";
 }
+
+// Optionally reevaluate the returned objective point's HS with checked integers.
+auto checked = solver.solve({{0, 0, 0}}, true);
 ```
+
+The second argument requests exact HS reevaluation and defaults to `false`.
+Python uses `solver.solve(refs, recompute_hs=True)`, also defaulting to `False`.
+It does not run another optimization or change `objective_value` or `status`.
+HS is computed directly from `result.solution_point` and the reference points
+using the existing corner map with checked 64-bit integer arithmetic.
+Reevaluation is available for optimal, time-limit, and node-limit incumbents.
+For a node-limit incumbent, requesting reevaluation also fills `solution_point`;
+`objective_value` retains its bound semantics. If no incumbent is available,
+`recomputed_hs` remains unset. On a failed requested reevaluation,
+`recomputed_hs` remains unset and the error is logged to standard error;
+solver status and `objective_value` remain unchanged.
+This evaluates the stored, rounded objective point. It does not reconstruct
+binary decisions or validate problem feasibility or optimality.
+An intermediate integer overflow can reject a result even when the final HS
+would fit in 64 bits.
+The corner map can grow exponentially in the number of reference points.
 
 Set additional Gurobi parameters through `SolverOptions::gurobi_params` before
 constructing the solver. Both names and values are strings:
@@ -421,13 +441,16 @@ solver = hs.MOKPSolver(
     strategy="miqp",
     options=options,
     reduce_corners=True,
+    normalization=hs.Normalization(
+        hs.NormalizationMethod.PrecisionOptimal, objective_scale=1e-6),
 )
 
-result = solver.solve([[0, 0, 0]])
+result = solver.solve([[0, 0, 0]], recompute_hs=True)
 if result.status == hs.SolveStatus.Optimal:
     print("HS:", result.objective_value)
     print("Objectives:", result.solution_point)
     print("Decisions:", result.decision_values)
+print("Recomputed HS:", result.recomputed_hs)
 
 # Reuse the same model with another set of reference points.
 result = solver.solve([[1, 1, 1], [2, 0, 1]])
@@ -436,9 +459,13 @@ result = solver.solve([[1, 1, 1], [2, 0, 1]])
 `strategy` accepts `"miqp"` (the default), `"log"`, or `"milp"`.
 `reduce_corners=True` enables aggregation for MIQP and Log; MILP always aggregates
 corners and does not accept this override. MIQP also accepts
-`normalization=hs.NormalizationMethod.PrecisionOptimal`, `UpperBound`, or
-`ReferenceGap`; the default is `hs.NormalizationMethod.None_`.
-Normalization is only configurable for MIQP.
+`normalization=hs.Normalization(...)`; its method defaults to
+`hs.NormalizationMethod.None_`. Passing an enum directly remains supported as
+shorthand for a `Normalization` with the default `objective_scale` of `1e-8`.
+The Python `Normalization` exposes read-only `method` and `objective_scale`
+properties. Normalization is only configurable for MIQP. `objective_scale`
+belongs to the `Normalization` value, must be positive and finite, and is
+independent of Gurobi's `FeasibilityTol`.
 
 All `SolverOptions` fields listed in the C++ API are writable from Python.
 Items and options are copied when constructing a solver; assign whole lists or
@@ -447,7 +474,9 @@ the native integer types: item indices use 32 bits; weights, capacity, objective
 values, and reference coordinates use 64 bits.
 
 Results expose read-only `status`, `objective_value`, `node_count`,
-`solution_point`, and `decision_values`. Statuses match the C++ API:
+`solution_point`, `decision_values`, and `recomputed_hs`.
+`recomputed_hs` is `None` unless requested and
+successfully reevaluated. Statuses match the C++ API:
 `Optimal`, `TimeLimitReached`, `InfeasibleOrUnbounded`, `NodeLimitReached`, and
 `Error`. Incumbent and bound fields retain the C++ status-dependent behavior.
 Invalid reference shapes and solve-time failures return `SolveStatus.Error`.
@@ -510,6 +539,7 @@ hs-moco/
 │   └── hs_moco/
 │       ├── hs_moco.hpp              ← umbrella header
 │       ├── core/
+│       │   ├── hypervolume.hpp      ← hypervolume computation
 │       │   ├── types.hpp            ← SolveStatus, SolverOptions, SolveResult
 │       │   ├── strategy.hpp         ← HSStrategy, AuxiliaryState, StrategyContext
 │       │   └── solver.hpp           ← MOKPSolver orchestrator

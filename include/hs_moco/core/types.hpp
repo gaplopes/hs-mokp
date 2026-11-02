@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,7 @@ struct SolveResult {
   int64_t                node_count;      ///< B&B nodes explored.
   std::vector<int64_t>   solution_point;  ///< Objective-space image f(x*).
   std::vector<double>    decision_values; ///< Decision variable values x* (optional).
+  std::optional<int64_t> recomputed_hs;   ///< HS of solution_point, only when requested.
 
   SolveResult()
       : status(SolveStatus::Error),
