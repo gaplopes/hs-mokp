@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -444,7 +445,8 @@ int main(int argc, char* argv[]) {
           // Validate.
           if (result.status == hs_moco::SolveStatus::Optimal ||
               result.status == hs_moco::SolveStatus::InfeasibleOrUnbounded) {
-            if (result.solution_point == exp_point && result.objective_value == exp_hs) {
+            if (result.solution_point == exp_point &&
+                std::round(result.objective_value) == static_cast<double>(exp_hs)) {
               std::cout << "  ✔ PASS";
               ++total_pass;
             } else {

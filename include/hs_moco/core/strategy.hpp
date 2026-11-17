@@ -20,7 +20,6 @@
  * model (decision vars + feasibility constraints) remains intact.
  */
 
-#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <ostream>
@@ -199,9 +198,10 @@ class HSStrategy {
    *
    * Some strategies (e.g. Log) store log(HS); this hook converts back.
    * Default: identity (returns @p raw_value as-is).
+   * Returns an approximate value without integer rounding.
    */
-  [[nodiscard]] virtual int64_t decode_objective(double raw_value) const noexcept {
-    return static_cast<int64_t>(std::llround(raw_value));
+  [[nodiscard]] virtual double decode_objective(double raw_value) const noexcept {
+    return raw_value;
   }
 
  protected:

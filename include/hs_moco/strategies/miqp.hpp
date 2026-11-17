@@ -154,8 +154,8 @@ class MIQPStrategy final : public HSStrategy {
     opts.feasibility_tol = 1e-9;
   }
 
-  [[nodiscard]] int64_t decode_objective(double raw_value) const noexcept override {
-    return static_cast<int64_t>(std::llround(raw_value * objective_multiplier_));
+  [[nodiscard]] double decode_objective(double raw_value) const noexcept override {
+    return raw_value * objective_multiplier_;
   }
 
   /**

@@ -164,8 +164,8 @@ class LogStrategy final : public HSStrategy {
   /**
    * @brief The raw objective is log(HS); decode by exponentiating.
    */
-  [[nodiscard]] int64_t decode_objective(double raw_value) const noexcept override {
-    return static_cast<int64_t>(std::llround(std::exp(raw_value)));
+  [[nodiscard]] double decode_objective(double raw_value) const noexcept override {
+    return std::exp(raw_value);
   }
 
   /**

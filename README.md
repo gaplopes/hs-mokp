@@ -352,6 +352,22 @@ if (result.status == hs_moco::SolveStatus::Optimal) {
 auto checked = solver.solve({{0, 0, 0}}, true);
 ```
 
+`SolveResult::objective_value` is an approximate `double` in original HS units.
+After checking the result status, use checked integer conversion when needed:
+
+```cpp
+auto integer64 = result.objective_as<int64_t>();
+```
+
+`objective_as<Integer>()` rounds to nearest, with halfway cases away from zero,
+and throws `std::range_error` for non-finite or out-of-range values. It supports
+bounded signed integer types, including `__int128_t` where the compiler supports
+it. Conversion leaves the stored value unchanged and cannot recover precision
+already lost in the `double`.
+
+Rebuild C++ consumers; custom `HSStrategy::decode_objective` overrides must return
+`double`.
+
 The second argument requests exact HS reevaluation and defaults to `false`.
 Python uses `solver.solve(refs, recompute_hs=True)`, also defaulting to `False`.
 It does not run another optimization or change `objective_value` or `status`.
@@ -470,11 +486,12 @@ independent of Gurobi's `FeasibilityTol`.
 All `SolverOptions` fields listed in the C++ API are writable from Python.
 Items and options are copied when constructing a solver; assign whole lists or
 dictionaries when changing `values` or `gurobi_params`. Python integers must fit
-the native integer types: item indices use 32 bits; weights, capacity, objective
-values, and reference coordinates use 64 bits.
+the native integer types: item indices use 32 bits; weights, capacity, item
+objective coefficients, and reference coordinates use 64 bits.
 
 Results expose read-only `status`, `objective_value`, `node_count`,
 `solution_point`, `decision_values`, and `recomputed_hs`.
+`objective_value` is a Python `float`; `recomputed_hs` is an `int` when available.
 `recomputed_hs` is `None` unless requested and
 successfully reevaluated. Statuses match the C++ API:
 `Optimal`, `TimeLimitReached`, `InfeasibleOrUnbounded`, `NodeLimitReached`, and
